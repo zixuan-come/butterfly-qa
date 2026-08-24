@@ -25,3 +25,4 @@ Thumbs.db
 
 # Runtime project inputs, generated artifacts, evidence, and decisions
 projects/*
+.gstack/
