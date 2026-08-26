@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -201,6 +202,16 @@ class Evidence(BaseModel):
     evidence_type: Literal["screenshot", "log", "video", "file", "other"]
     path: str = Field(min_length=1)
     description: str = Field(min_length=1)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int | None = Field(default=None, ge=0)
+    media_type: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_relative_path(self) -> "Evidence":
+        path = PurePosixPath(self.path.replace("\\", "/"))
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError("evidence path must stay inside the project directory")
+        return self
 
 
 class ExecutionRecord(BaseModel):
@@ -217,6 +228,24 @@ class ExecutionRecord(BaseModel):
     defect_refs: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class ExecutionBatch(BaseModel):
+    """Versioned set of manual results for one approved test design."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meta: ArtifactMeta
+    test_design_id: str = Field(min_length=1)
+    test_design_version: int = Field(ge=1)
+    records: list[ExecutionRecord] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def require_unique_case_results(self) -> "ExecutionBatch":
+        case_refs = [(record.case_id, record.case_version) for record in self.records]
+        if len(case_refs) != len(set(case_refs)):
+            raise ValueError("execution records must contain one result per case version")
+        return self
 
 
 class TestReport(BaseModel):
