@@ -78,6 +78,8 @@
 
 输出中的状态和动作必须能被 Python Harness 重新校验。无法确认下一步时，必须选择 `manual_intervention`，不能猜测并推进流程。
 
+特别注意：`input_artifact_refs` 只能引用当前工作流中的结构化产物，例如 `design-001:v1` 或活动产物名称。原始需求、设计图和附件属于 `input_files`，已经由 Harness 自动传入，绝不能把 `input_id`（例如 `requirement-001`）填写到 `input_artifact_refs` 中。
+
 ## 权限边界
 
 - 可以读取当前项目产物和流程状态。
@@ -93,6 +95,7 @@
 ## 失败处理
 
 - Agent 输出无法通过 Schema 校验：转 `manual_intervention`，保留原始响应摘要。
+- 当前处于 `requirement_reviewing`、`requirement_analyzing`、`testcase_designing` 或 `testcase_reviewing` 等处理中状态，但对应活动产物因上次调用失败而不存在：重新调用当前阶段对应的专业 Agent 和 Skill，目标状态保持当前状态；不要仅因产物缺失立即转人工。
 - 状态转换不合法：停止当前动作，保留当前状态并报告错误。
 - 连续修订超过上限：转人工介入。
 - 输入资料缺失：输出缺失清单，不得用猜测补全事实。

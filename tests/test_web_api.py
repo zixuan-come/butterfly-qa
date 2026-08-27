@@ -1,0 +1,620 @@
+import json
+from datetime import datetime, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+from qa_agent.agent_protocol import AgentRequest, AgentResponse, AgentStatus
+from qa_agent.agent_runner import AgentRunner
+from qa_agent.project import ProjectManager
+from qa_agent.schemas import (
+    ArtifactMeta,
+    ArtifactStatus,
+    TestCase as CaseModel,
+    TestDesign as DesignModel,
+    TestPoint as PointModel,
+    TestReport as ReportModel,
+    TestStep as StepModel,
+)
+from qa_agent.storage import ArtifactStore
+from qa_agent.web import create_app
+from qa_agent.workflow.models import ArtifactPointer
+from qa_agent.workflow.states import WorkflowState
+
+
+def _client(tmp_path) -> TestClient:
+    return TestClient(create_app(tmp_path))
+
+
+def test_health_uses_the_standard_response_envelope(tmp_path):
+    with _client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/health",
+            headers={"X-Request-ID": "request-health-001"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "request-health-001"
+    assert response.json() == {
+        "code": "OK",
+        "message": "请求成功",
+        "data": {
+            "status": "healthy",
+            "service": "butterfly-qa-api",
+            "version": "0.1.0",
+        },
+        "request_id": "request-health-001",
+    }
+
+
+def test_project_create_list_and_detail_share_domain_state(tmp_path):
+    with _client(tmp_path) as client:
+        created = client.post(
+            "/api/v1/projects",
+            json={
+                "project_id": "address-change",
+                "name": "修改收货地址",
+                "created_by": "tester-001",
+            },
+        )
+        listed = client.get("/api/v1/projects")
+        detail = client.get("/api/v1/projects/address-change")
+
+    assert created.status_code == 201
+    assert created.json()["code"] == "OK"
+    assert created.json()["data"]["state"] == "requirement_received"
+    assert listed.status_code == 200
+    assert listed.json()["data"]["total"] == 1
+    assert listed.json()["data"]["items"][0]["project_id"] == "address-change"
+    assert detail.status_code == 200
+    assert detail.json()["data"]["workflow_id"].startswith("wf-")
+    assert detail.json()["data"]["revision_rounds"] == {
+        "requirement": 0,
+        "testcase": 0,
+        "report": 0,
+    }
+
+
+def test_duplicate_project_returns_conflict_with_business_code(tmp_path):
+    payload = {
+        "project_id": "demo",
+        "name": "演示项目",
+        "created_by": "tester-001",
+    }
+    with _client(tmp_path) as client:
+        assert client.post("/api/v1/projects", json=payload).status_code == 201
+        response = client.post("/api/v1/projects", json=payload)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "PROJECT_ALREADY_EXISTS"
+    assert response.json()["message"] == "项目已存在"
+    assert response.json()["data"] is None
+    assert response.json()["request_id"]
+
+
+def test_missing_project_returns_not_found(tmp_path):
+    with _client(tmp_path) as client:
+        response = client.get("/api/v1/projects/missing")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "PROJECT_NOT_FOUND"
+    assert response.json()["message"] == "项目不存在"
+    assert response.json()["data"] is None
+
+
+def test_validation_error_keeps_the_standard_response_envelope(tmp_path):
+    with _client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/projects",
+            json={
+                "project_id": "invalid project id",
+                "name": "",
+                "created_by": "tester-001",
+                "unexpected": True,
+            },
+        )
+
+    payload = response.json()
+    assert response.status_code == 422
+    assert payload["code"] == "INVALID_REQUEST"
+    assert payload["message"] == "请求参数校验失败"
+    assert len(payload["data"]["errors"]) == 3
+    assert payload["request_id"]
+
+
+def test_input_upload_is_persisted_and_visible_in_workflow_status(tmp_path):
+    with _client(tmp_path) as client:
+        client.post(
+            "/api/v1/projects",
+            json={
+                "project_id": "demo",
+                "name": "演示项目",
+                "created_by": "tester-001",
+            },
+        )
+        uploaded = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "requirement-001",
+            },
+            files={"file": ("requirement.md", "# 修改收货地址", "text/markdown")},
+        )
+        workflow = client.get("/api/v1/projects/demo/workflow")
+
+    assert uploaded.status_code == 201
+    assert uploaded.json()["data"]["original_name"] == "requirement.md"
+    assert uploaded.json()["data"]["input_id"] == "requirement-001"
+    assert workflow.status_code == 200
+    assert workflow.json()["data"]["state"] == "requirement_received"
+    assert workflow.json()["data"]["input_files"][0]["input_id"] == "requirement-001"
+
+
+def test_input_upload_rejects_oversized_file_and_removes_temporary_file(tmp_path):
+    app = create_app(tmp_path, max_upload_bytes=4)
+    with TestClient(app) as client:
+        client.post(
+            "/api/v1/projects",
+            json={
+                "project_id": "demo",
+                "name": "演示项目",
+                "created_by": "tester-001",
+            },
+        )
+        response = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={"category": "requirement", "imported_by": "tester-001"},
+            files={"file": ("requirement.md", "12345", "text/markdown")},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["code"] == "FILE_TOO_LARGE"
+    upload_dir = tmp_path / ".butterfly-qa" / "uploads"
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_text_input_preview_uses_envelope_and_respects_size_limit(tmp_path):
+    app = create_app(tmp_path, max_text_preview_bytes=4)
+    with TestClient(app) as client:
+        _create_project(client)
+        uploaded = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "requirement-text",
+            },
+            files={"file": ("requirement.md", "abcdef", "text/markdown")},
+        )
+        response = client.get(
+            "/api/v1/projects/demo/inputs/requirement-text"
+        )
+
+    assert uploaded.status_code == 201
+    assert response.status_code == 200
+    assert response.json()["data"]["preview_kind"] == "text"
+    assert response.json()["data"]["content"] == "abcd"
+    assert response.json()["data"]["truncated"] is True
+    assert response.json()["data"]["input"]["original_name"] == "requirement.md"
+
+
+def test_binary_input_preview_exposes_safe_inline_content(tmp_path):
+    content = b"not-a-real-png"
+    with _client(tmp_path) as client:
+        _create_project(client)
+        client.post(
+            "/api/v1/projects/demo/inputs",
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "requirement-image",
+            },
+            files={"file": ("requirement.png", content, "image/png")},
+        )
+        preview = client.get(
+            "/api/v1/projects/demo/inputs/requirement-image"
+        )
+        raw = client.get(
+            "/api/v1/projects/demo/inputs/requirement-image/content"
+        )
+
+    assert preview.status_code == 200
+    assert preview.json()["data"]["preview_kind"] == "image"
+    assert preview.json()["data"]["content"] is None
+    assert raw.status_code == 200
+    assert raw.headers["content-type"] == "image/png"
+    assert raw.headers["content-disposition"] == "inline"
+    assert raw.content == content
+
+
+def test_missing_input_preview_returns_not_found(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        response = client.get("/api/v1/projects/demo/inputs/missing")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "INPUT_NOT_FOUND"
+
+
+class QueueRunner(AgentRunner):
+    def __init__(self, outputs: list[str]) -> None:
+        self.outputs = iter(outputs)
+        self.requests: list[AgentRequest] = []
+
+    def run(self, request: AgentRequest) -> AgentResponse:
+        self.requests.append(request)
+        now = datetime.now(timezone.utc)
+        return AgentResponse(
+            request_id=request.request_id,
+            role=request.role,
+            status=AgentStatus.SUCCEEDED,
+            output_text=next(self.outputs),
+            started_at=now,
+            completed_at=now,
+        )
+
+
+def test_run_endpoint_executes_one_bounded_orchestration_step(tmp_path):
+    runner = QueueRunner(
+        [
+            json.dumps(
+                {
+                    "action": "wait_human",
+                    "reason": "尚未导入需求",
+                    "human_question": "请先上传产品需求文档",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    app = create_app(
+        tmp_path,
+        runner_factory=lambda _workspace, _store: runner,
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/api/v1/projects",
+            json={
+                "project_id": "demo",
+                "name": "演示项目",
+                "created_by": "tester-001",
+            },
+        )
+        response = client.post("/api/v1/projects/demo/runs", json={})
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "OK"
+    assert response.json()["data"]["state"] == "requirement_received"
+    assert response.json()["data"]["action"]["action"] == "wait_human"
+    assert response.json()["data"]["agent"]["status"] == "succeeded"
+    assert len(runner.requests) == 1
+
+
+def _create_project(client: TestClient, project_id: str = "demo") -> None:
+    response = client.post(
+        "/api/v1/projects",
+        json={
+            "project_id": project_id,
+            "name": "演示项目",
+            "created_by": "tester-001",
+        },
+    )
+    assert response.status_code == 201
+
+
+def _seed_test_design(
+    tmp_path,
+    state: WorkflowState,
+    project_id: str = "demo",
+) -> ArtifactStore:
+    timestamp = datetime.now(timezone.utc)
+    store = ArtifactStore(tmp_path / "projects")
+    design = DesignModel(
+        meta=ArtifactMeta(
+            artifact_id="design-001",
+            artifact_type="test_design",
+            project_id=project_id,
+            status=ArtifactStatus.APPROVED,
+            created_by="test-agent",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        test_points=[
+            PointModel(
+                test_point_id="TP-001",
+                requirement_refs=["REQ-001"],
+                category="normal",
+                description="保存地址",
+            )
+        ],
+        test_cases=[
+            CaseModel(
+                case_id="TC-001",
+                requirement_refs=["REQ-001"],
+                test_point_refs=["TP-001"],
+                title="保存有效地址",
+                priority="P1",
+                steps=[
+                    StepModel(
+                        step_no=1,
+                        action="保存地址",
+                        expected_result="保存成功",
+                    )
+                ],
+            )
+        ],
+    )
+    store.save_artifact(design)
+    manager = ProjectManager(store.projects_root)
+    workflow = manager.load_workflow(project_id)
+    workflow.current_state = state
+    workflow.active_artifacts["test_design"] = ArtifactPointer(
+        artifact_id="design-001",
+        artifact_type="test_design",
+        version=1,
+    )
+    store.save_workflow(project_id, workflow)
+    return store
+
+
+def _seed_test_report(
+    tmp_path,
+    state: WorkflowState,
+    project_id: str = "demo",
+) -> ArtifactStore:
+    timestamp = datetime.now(timezone.utc)
+    store = ArtifactStore(tmp_path / "projects")
+    report = ReportModel(
+        meta=ArtifactMeta(
+            artifact_id="report-001",
+            artifact_type="test_report",
+            project_id=project_id,
+            status=ArtifactStatus.PENDING,
+            created_by="main-flow-agent",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        scope="修改收货地址",
+        environment="SIT",
+        total_cases=1,
+        passed=1,
+        failed=0,
+        blocked=0,
+        skipped=0,
+        conclusion="核心功能验证通过。",
+    )
+    store.save_artifact(report)
+    manager = ProjectManager(store.projects_root)
+    workflow = manager.load_workflow(project_id)
+    workflow.current_state = state
+    workflow.active_artifacts["test_report"] = ArtifactPointer(
+        artifact_id="report-001",
+        artifact_type="test_report",
+        version=1,
+    )
+    store.save_workflow(project_id, workflow)
+    return store
+
+
+def _execution_payload(*, with_missing_evidence: bool = False) -> dict:
+    evidence = []
+    if with_missing_evidence:
+        evidence.append(
+            {
+                "evidence_id": "missing-log",
+                "evidence_type": "log",
+                "path": "evidence/missing.log",
+                "description": "不存在的日志",
+            }
+        )
+    return {
+        "submitted_by": "tester-001",
+        "records": [
+            {
+                "record_id": "record-TC-001",
+                "case_id": "TC-001",
+                "case_version": 1,
+                "environment": "test",
+                "executed_by": "tester-001",
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+                "result": "passed",
+                "actual_result": "结果符合预期",
+                "evidence": evidence,
+            }
+        ],
+    }
+
+
+def test_web_application_and_built_assets_are_served(tmp_path):
+    with _client(tmp_path) as client:
+        page = client.get("/")
+
+        assert page.status_code == 200
+        assert "text/html" in page.headers["content-type"]
+        assert '<div id="app"></div>' in page.text
+        asset_path = page.text.split('src="', 1)[1].split('"', 1)[0]
+        asset = client.get(asset_path)
+
+    assert asset.status_code == 200
+    assert "javascript" in asset.headers["content-type"]
+
+
+def test_approval_uses_active_artifact_and_advances_workflow(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_TESTCASE_APPROVAL)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "testcase_approval",
+                "decision": "approved",
+                "decided_by": "tester-001",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["target_artifact"] == {
+        "artifact_id": "design-001",
+        "artifact_type": "test_design",
+        "version": 1,
+    }
+    assert response.json()["data"]["state"] == "waiting_manual_execution"
+
+
+def test_testcase_changes_requested_returns_to_revision(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_TESTCASE_APPROVAL)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "testcase_approval",
+                "decision": "changes_requested",
+                "decided_by": "tester-001",
+                "comment": "补充管理员权限和并发保存场景",
+            },
+        )
+        workflow = client.get("/api/v1/projects/demo/workflow")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["state"] == "waiting_case_revision"
+    assert workflow.json()["data"]["revision_rounds"]["testcase"] == 1
+
+
+@pytest.mark.parametrize("decision", ["changes_requested", "rejected"])
+def test_report_non_approval_returns_to_generation(tmp_path, decision):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_report(tmp_path, WorkflowState.WAITING_REPORT_APPROVAL)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "report_approval",
+                "decision": decision,
+                "decided_by": "tester-001",
+                "comment": "补充失败用例风险和发布建议",
+            },
+        )
+        workflow = client.get("/api/v1/projects/demo/workflow")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["state"] == "generating_report"
+    assert workflow.json()["data"]["revision_rounds"]["report"] == 1
+
+
+def test_non_approval_requires_comment(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_TESTCASE_APPROVAL)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "testcase_approval",
+                "decision": "rejected",
+                "decided_by": "tester-001",
+                "comment": "   ",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "INVALID_REQUEST"
+
+
+def test_approval_rejects_invalid_workflow_state(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.REQUIREMENT_RECEIVED)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "testcase_approval",
+                "decision": "approved",
+                "decided_by": "tester-001",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "HUMAN_ACTION_REJECTED"
+
+
+def test_manual_execution_advances_to_report_generation(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        response = client.post(
+            "/api/v1/projects/demo/executions",
+            json=_execution_payload(),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["state"] == "generating_report"
+    assert response.json()["data"]["artifact_path"].endswith("v1.json")
+
+
+def test_manual_execution_rejects_missing_evidence(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        response = client.post(
+            "/api/v1/projects/demo/executions",
+            json=_execution_payload(with_missing_evidence=True),
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "HUMAN_ACTION_REJECTED"
+    assert "evidence file does not exist" in response.json()["message"]
+
+
+def test_evidence_upload_is_immutable_and_rejects_duplicate_id(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        first = client.post(
+            "/api/v1/projects/demo/evidence",
+            data={
+                "evidence_type": "screenshot",
+                "description": "保存成功截图",
+                "evidence_id": "proof-001",
+            },
+            files={"file": ("proof.png", b"png-content", "image/png")},
+        )
+        duplicate = client.post(
+            "/api/v1/projects/demo/evidence",
+            data={
+                "evidence_type": "log",
+                "description": "重复标识日志",
+                "evidence_id": "proof-001",
+            },
+            files={"file": ("proof.log", b"log-content", "text/plain")},
+        )
+
+    assert first.status_code == 201
+    assert first.json()["data"]["path"] == "evidence/proof-001.png"
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "EVIDENCE_ALREADY_EXISTS"
+    assert not (tmp_path / "projects" / "demo" / "evidence" / "proof-001.log").exists()
+
+
+def test_active_artifact_returns_json_and_optional_markdown(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        store = _seed_test_design(
+            tmp_path,
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+        )
+        store.save_artifact_text(
+            "demo",
+            "test_design",
+            "design-001",
+            1,
+            "# 测试设计",
+        )
+        response = client.get("/api/v1/projects/demo/artifacts/test_design")
+        missing = client.get("/api/v1/projects/demo/artifacts/test_report")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["content"]["meta"]["artifact_id"] == "design-001"
+    assert response.json()["data"]["markdown"] == "# 测试设计"
+    assert response.json()["data"]["markdown_path"].endswith("v1.md")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "ACTIVE_ARTIFACT_NOT_FOUND"

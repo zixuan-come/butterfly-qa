@@ -122,6 +122,7 @@ class ProjectManager:
         *,
         imported_by: str,
         input_id: str | None = None,
+        original_name: str | None = None,
         imported_at: datetime | None = None,
     ) -> ProjectInput:
         source = Path(source_path).resolve(strict=True)
@@ -145,7 +146,7 @@ class ProjectManager:
         imported = ProjectInput(
             input_id=resolved_input_id,
             category=category,
-            original_name=source.name,
+            original_name=Path(original_name).name if original_name else source.name,
             relative_path=relative_path.as_posix(),
             media_type=self._detect_media_type(source),
             size_bytes=size,
