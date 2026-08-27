@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "artifact_id": "execution-001",
+    "artifact_type": "test_execution",
+    "project_id": "请替换为项目ID",
+    "version": 1,
+    "status": "completed",
+    "source_artifacts": [
+      "请替换为test_design_id"
+    ],
+    "created_by": "tester-001",
+    "created_at": "2026-08-25T14:30:00+08:00",
+    "updated_at": "2026-08-25T14:30:00+08:00"
+  },
+  "test_design_id": "请替换为test_design_id",
+  "test_design_version": 1,
+  "records": [
+    {
+      "record_id": "record-TC-001",
+      "case_id": "TC-001",
+      "case_version": 1,
+      "environment": "SIT",
+      "executed_by": "tester-001",
+      "executed_at": "2026-08-25T14:30:00+08:00",
+      "result": "passed",
+      "actual_result": "实际结果与预期一致",
+      "defect_refs": [],
+      "evidence": [],
+      "notes": []
+    },
+    {
+      "record_id": "record-TC-002",
+      "case_id": "TC-002",
+      "case_version": 1,
+      "environment": "SIT",
+      "executed_by": "tester-001",
+      "executed_at": "2026-08-25T14:35:00+08:00",
+      "result": "failed",
+      "actual_result": "点击保存后页面提示系统异常",
+      "defect_refs": [
+        "BUG-001"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "请替换为evidence add返回的ID",
+          "evidence_type": "screenshot",
+          "path": "evidence/请替换为实际文件名.png",
+          "description": "TC-002 保存失败截图",
+          "sha256": null,
+          "size_bytes": null,
+          "media_type": "image/png"
+        }
+      ],
+      "notes": [
+        "已提交缺陷，等待修复"
+      ]
+    }
+  ]
+}

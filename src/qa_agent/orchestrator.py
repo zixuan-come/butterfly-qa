@@ -1,0 +1,353 @@
+"""Main-flow orchestration for the Butterfly QA workflow."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from pydantic import BaseModel
+
+from .agent_protocol import (
+    AgentRequest,
+    AgentResponse,
+    AgentRole,
+    AgentStatus,
+    WorkflowAction,
+    WorkflowActionType,
+)
+from .agent_runner import AgentRunner
+from .reporting import TestReportService
+from .schemas import (
+    RequirementAnalysis,
+    RequirementReview,
+    TestCaseReview,
+    TestDesign,
+    TestReport,
+)
+from .storage.artifact_store import ArtifactStore
+from .validation.artifact_validator import validate_artifact
+from .workflow.models import ArtifactPointer, WorkflowRun, WorkflowTransition
+from .workflow.state_machine import WorkflowStateMachine
+from .workflow.states import WorkflowState
+
+
+class OrchestrationError(ValueError):
+    """Raised when a main-flow action cannot be safely executed."""
+
+
+@dataclass(frozen=True)
+class OrchestrationResult:
+    """Outcome of one bounded orchestration step."""
+
+    main_response: AgentResponse
+    action: WorkflowAction | None = None
+    specialist_response: AgentResponse | None = None
+    artifact_path: Path | None = None
+    markdown_path: Path | None = None
+    transition: WorkflowTransition | None = None
+    error: str | None = None
+
+
+class WorkflowOrchestrator:
+    """Ask the main-flow agent for one action and execute it through the Harness."""
+
+    _ARTIFACT_MODELS: dict[str, type[BaseModel]] = {
+        "requirement_review": RequirementReview,
+        "requirement_analysis": RequirementAnalysis,
+        "test_design": TestDesign,
+        "testcase_review": TestCaseReview,
+        "test_report": TestReport,
+    }
+
+    def __init__(
+        self,
+        workflow: WorkflowRun,
+        runner: AgentRunner,
+        *,
+        artifact_store: ArtifactStore | None = None,
+        project_root: str | Path | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.workflow = workflow
+        self.runner = runner
+        self.artifact_store = artifact_store
+        self.project_root = Path(project_root).resolve() if project_root else None
+        self.model = model
+
+    def step(self, *, trigger: str = "main-flow-harness") -> OrchestrationResult:
+        """Execute one main-flow decision and at most one specialist invocation."""
+
+        main_request = self._main_request()
+        main_response = self.runner.run(main_request)
+        if main_response.status is not AgentStatus.SUCCEEDED:
+            return OrchestrationResult(
+                main_response=main_response,
+                error="main-flow agent invocation failed; workflow state was preserved",
+            )
+
+        try:
+            action = self.parse_action(main_response.output_text)
+            self._validate_action_target(action)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return OrchestrationResult(
+                main_response=main_response,
+                error=f"invalid workflow action: {exc}",
+            )
+
+        if action.action is WorkflowActionType.WAIT_HUMAN:
+            return OrchestrationResult(main_response=main_response, action=action)
+
+        if action.action in {
+            WorkflowActionType.TRANSITION,
+            WorkflowActionType.MANUAL_INTERVENTION,
+        }:
+            target = (
+                WorkflowState.MANUAL_INTERVENTION_REQUIRED
+                if action.action is WorkflowActionType.MANUAL_INTERVENTION
+                else action.target_state
+            )
+            transition = self._transition(target, trigger, action.reason)
+            return OrchestrationResult(
+                main_response=main_response,
+                action=action,
+                transition=transition,
+            )
+
+        try:
+            specialist_request = self._specialist_request(action)
+        except ValueError as exc:
+            return OrchestrationResult(
+                main_response=main_response,
+                action=action,
+                error=f"specialist request rejected: {exc}",
+            )
+
+        transition = self._transition_if_needed(action.target_state, trigger, action.reason)
+        specialist_response = self.runner.run(specialist_request)
+        if specialist_response.status is not AgentStatus.SUCCEEDED:
+            return OrchestrationResult(
+                main_response=main_response,
+                action=action,
+                specialist_response=specialist_response,
+                transition=transition,
+                error="specialist agent invocation failed; workflow state was preserved",
+            )
+
+        try:
+            artifact, artifact_path, markdown_path, accepted_transition = self._accept_artifact(
+                action.expected_output_type or "",
+                specialist_response.output_text,
+            )
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return OrchestrationResult(
+                main_response=main_response,
+                action=action,
+                specialist_response=specialist_response,
+                transition=transition,
+                error=f"specialist output rejected: {exc}",
+            )
+
+        return OrchestrationResult(
+            main_response=main_response,
+            action=action,
+            specialist_response=specialist_response,
+            artifact_path=artifact_path,
+            markdown_path=markdown_path,
+            transition=accepted_transition or transition,
+        )
+
+    @staticmethod
+    def parse_action(output_text: str) -> WorkflowAction:
+        """Parse a JSON action, accepting a Markdown JSON fence from the model."""
+
+        payload = _parse_json_object(output_text)
+        return WorkflowAction.model_validate(payload)
+
+    def _main_request(self) -> AgentRequest:
+        refs = list(self.workflow.active_artifacts.values())
+        input_summary = ", ".join(
+            f"{item.input_id}({item.category})" for item in self.workflow.input_files
+        ) or "无"
+        artifact_summary = ", ".join(
+            f"{name}={pointer.artifact_id}:v{pointer.version}"
+            for name, pointer in self.workflow.active_artifacts.items()
+        ) or "无"
+        return AgentRequest(
+            request_id=f"main-{uuid4().hex}",
+            project_id=self.workflow.project_id,
+            role=AgentRole.MAIN_FLOW,
+            task_name=f"route:{self.workflow.current_state.value}",
+            prompt=(
+                f"当前工作流状态为 {self.workflow.current_state.value}。\n"
+                f"允许的下一状态为：{', '.join(state.value for state in WorkflowStateMachine(self.workflow).available_states()) or '无'}。\n"
+                f"已导入的原始输入摘要：{input_summary}。\n"
+                f"当前活动结构化产物：{artifact_summary}。\n"
+                "你只负责路由，不得读取或评审原始需求内容。处理中状态缺少当前阶段产物时，"
+                "应重新调用该阶段的专业 Agent，目标状态保持当前状态。\n"
+                "请根据当前产物和状态返回一个严格 JSON 的 WorkflowAction。\n"
+                "注意：input_artifact_refs 只能填写结构化产物引用；原始输入文件已经通过 input_files 自动提供，"
+                "不要把 input_id（例如 requirement-001）填写到 input_artifact_refs。"
+            ),
+            input_files=[],
+            input_artifacts=refs,
+            created_at=datetime.now(timezone.utc),
+            model=self.model,
+            working_directory=str(self.project_root) if self.project_root else None,
+        )
+
+    def _specialist_request(self, action: WorkflowAction) -> AgentRequest:
+        refs = self._resolve_artifact_refs(action.input_artifact_refs)
+        return AgentRequest(
+            request_id=f"specialist-{uuid4().hex}",
+            project_id=self.workflow.project_id,
+            role=action.target_role,
+            task_name=action.skill_name or action.expected_output_type or "specialist-task",
+            skill_name=action.skill_name,
+            prompt=action.reason,
+            input_files=self.workflow.input_files,
+            input_artifacts=refs,
+            created_at=datetime.now(timezone.utc),
+            model=self.model,
+            working_directory=str(self.project_root) if self.project_root else None,
+        )
+
+    def _validate_action_target(self, action: WorkflowAction) -> None:
+        if action.action is WorkflowActionType.INVOKE_AGENT:
+            expected_model = self._ARTIFACT_MODELS.get(action.expected_output_type or "")
+            if expected_model is None:
+                raise OrchestrationError(
+                    f"unsupported expected_output_type: {action.expected_output_type!r}"
+                )
+            if action.expected_output_type == "test_report":
+                if action.target_role is not AgentRole.MAIN_FLOW:
+                    raise OrchestrationError(
+                        "test_report must be generated by the main_flow agent"
+                    )
+                if action.skill_name != "test-report":
+                    raise OrchestrationError(
+                        "test_report requires the test-report skill"
+                    )
+            elif action.target_role is AgentRole.MAIN_FLOW:
+                raise OrchestrationError(
+                    "main_flow may only invoke the test-report skill"
+                )
+            allowed_targets = WorkflowStateMachine(self.workflow).available_states() | {
+                self.workflow.current_state
+            }
+            if action.target_state not in allowed_targets:
+                raise OrchestrationError(
+                    f"invoke target state is not reachable: {action.target_state.value}"
+                )
+        elif action.action is WorkflowActionType.TRANSITION:
+            if action.target_state not in WorkflowStateMachine(self.workflow).available_states():
+                raise OrchestrationError(
+                    f"transition target state is not allowed: {action.target_state.value}"
+                )
+
+    def _transition_if_needed(
+        self,
+        target: WorkflowState | None,
+        trigger: str,
+        reason: str,
+    ) -> WorkflowTransition | None:
+        if target is None or target is self.workflow.current_state:
+            return None
+        return self._transition(target, trigger, reason)
+
+    def _transition(
+        self,
+        target: WorkflowState | None,
+        trigger: str,
+        reason: str,
+    ) -> WorkflowTransition:
+        if target is None:
+            raise OrchestrationError("transition target state is missing")
+        transition = WorkflowStateMachine(self.workflow).transition(
+            target,
+            triggered_by=trigger,
+            reason=reason,
+        )
+        self._save_workflow()
+        return transition
+
+    def _accept_artifact(
+        self,
+        artifact_type: str,
+        output_text: str,
+    ) -> tuple[
+        BaseModel,
+        Path | None,
+        Path | None,
+        WorkflowTransition | None,
+    ]:
+        model_type = self._ARTIFACT_MODELS.get(artifact_type)
+        if model_type is None:
+            raise OrchestrationError(f"unsupported artifact type: {artifact_type!r}")
+        artifact = validate_artifact(model_type, _parse_json_object(output_text))
+        if artifact.meta.project_id != self.workflow.project_id:
+            raise OrchestrationError("artifact project_id does not match workflow")
+        if artifact.meta.artifact_type != artifact_type:
+            raise OrchestrationError(
+                f"artifact_type mismatch: expected {artifact_type!r}, got {artifact.meta.artifact_type!r}"
+            )
+        if artifact_type == "test_report":
+            if self.artifact_store is None:
+                raise OrchestrationError(
+                    "artifact_store is required to validate and save test_report"
+                )
+            saved = TestReportService(
+                self.workflow,
+                self.artifact_store,
+            ).accept(artifact)
+            return artifact, saved.json_path, saved.markdown_path, saved.transition
+        artifact_path = self.artifact_store.save_artifact(artifact) if self.artifact_store else None
+        pointer = ArtifactPointer(
+            artifact_id=artifact.meta.artifact_id,
+            artifact_type=artifact.meta.artifact_type,
+            version=artifact.meta.version,
+        )
+        self.workflow.active_artifacts[artifact_type] = pointer
+        self.workflow.updated_at = datetime.now(timezone.utc)
+        self._save_workflow()
+        return artifact, artifact_path, None, None
+
+    def _resolve_artifact_refs(self, refs: list[str]) -> list[ArtifactPointer]:
+        if not refs:
+            return list(self.workflow.active_artifacts.values())
+        resolved: list[ArtifactPointer] = []
+        for ref in refs:
+            match = next(
+                (
+                    pointer
+                    for key, pointer in self.workflow.active_artifacts.items()
+                    if ref in {key, pointer.artifact_id, f"{pointer.artifact_id}:v{pointer.version}"}
+                ),
+                None,
+            )
+            if match is None:
+                raise OrchestrationError(f"unknown input artifact reference: {ref}")
+            resolved.append(match)
+        return resolved
+
+    def _save_workflow(self) -> None:
+        if self.artifact_store:
+            self.artifact_store.save_workflow(self.workflow.project_id, self.workflow)
+
+
+def _parse_json_object(output_text: str) -> dict[str, Any]:
+    text = output_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("JSON output must be an object")
+    return payload
