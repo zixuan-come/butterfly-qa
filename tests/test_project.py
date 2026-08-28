@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from qa_agent.project import InputCategory, ProjectManager
+from qa_agent.project import FeatureModuleManager, InputCategory, ProjectManager
 from qa_agent.storage import ArtifactStoreError
 from qa_agent.workflow.states import WorkflowState
 
@@ -101,3 +101,62 @@ def test_import_input_rejects_unsafe_id_before_copying(tmp_path):
         )
 
     assert not (tmp_path / "projects" / "demo" / "outside.md").exists()
+def test_create_feature_modules_initializes_independent_workflows(tmp_path):
+    projects_root = tmp_path / "projects"
+    project_manager = ProjectManager(projects_root)
+    _, root_workflow = project_manager.create_project(
+        "commerce",
+        "电商平台",
+        created_by="tester-001",
+    )
+
+    checkout_manager = FeatureModuleManager(projects_root, "commerce", "checkout")
+    profile_manager = FeatureModuleManager(projects_root, "commerce", "profile")
+    checkout, checkout_workflow = checkout_manager.create_module(
+        "结算",
+        created_by="tester-001",
+    )
+    profile, profile_workflow = profile_manager.create_module(
+        "个人资料",
+        created_by="tester-002",
+    )
+
+    project_root = project_manager.store.project_root("commerce")
+    assert checkout.project_id == "commerce"
+    assert checkout.module_id == "checkout"
+    assert profile.module_id == "profile"
+    assert checkout_workflow.workflow_id != profile_workflow.workflow_id
+    assert checkout_workflow.workflow_id != root_workflow.workflow_id
+    assert (project_root / "modules" / "checkout" / "module.json").is_file()
+    assert (project_root / "modules" / "checkout" / "workflow.json").is_file()
+    assert (project_root / "modules" / "profile" / "artifacts").is_dir()
+    assert project_manager.load_workflow("commerce") == root_workflow
+
+
+def test_feature_module_inputs_are_isolated_from_other_modules_and_v1(tmp_path):
+    projects_root = tmp_path / "projects"
+    source = tmp_path / "checkout.md"
+    source.write_text("# 结算需求", encoding="utf-8")
+    project_manager = ProjectManager(projects_root)
+    project_manager.create_project("commerce", "电商平台", created_by="tester-001")
+    checkout_manager = FeatureModuleManager(projects_root, "commerce", "checkout")
+    profile_manager = FeatureModuleManager(projects_root, "commerce", "profile")
+    checkout_manager.create_module("结算", created_by="tester-001")
+    profile_manager.create_module("个人资料", created_by="tester-001")
+
+    imported = checkout_manager.import_input(
+        "commerce",
+        source,
+        InputCategory.REQUIREMENT,
+        imported_by="tester-001",
+        input_id="checkout-requirement",
+    )
+
+    checkout_root = checkout_manager.store.project_root("commerce")
+    assert (checkout_root / imported.relative_path).is_file()
+    assert checkout_manager.load_module().inputs == [imported]
+    assert checkout_manager.load_workflow("commerce").input_files == [imported.pointer()]
+    assert profile_manager.load_module().inputs == []
+    assert profile_manager.load_workflow("commerce").input_files == []
+    assert project_manager.load_project("commerce").inputs == []
+    assert project_manager.load_workflow("commerce").input_files == []

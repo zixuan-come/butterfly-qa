@@ -28,7 +28,7 @@ async function request(path, options = {}) {
   try {
     response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers })
   } catch (error) {
-    throw new ApiClientError('无法连接 Butterfly QA API，请确认后端服务已启动', {
+    throw new ApiClientError('无法连接 Butterfly Agent API，请确认后端服务已启动', {
       code: 'NETWORK_ERROR',
     })
   }
@@ -60,66 +60,112 @@ export function getProject(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}`)
 }
 
-export function getWorkflow(projectId) {
-  return request(`/projects/${encodeURIComponent(projectId)}/workflow`)
+export function listFeatureModules(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/modules`)
 }
 
-export function uploadProjectInput(projectId, file, { category, importedBy, inputId } = {}) {
+export function createFeatureModule(projectId, payload) {
+  return request(`/projects/${encodeURIComponent(projectId)}/modules`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function withModule(path, moduleId) {
+  if (!moduleId) return path
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}module_id=${encodeURIComponent(moduleId)}`
+}
+
+export function getWorkflow(projectId, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/workflow`,
+    moduleId,
+  ))
+}
+
+export function uploadProjectInput(
+  projectId,
+  file,
+  { category, importedBy, inputId, moduleId } = {},
+) {
   const body = new FormData()
   body.append('file', file)
   body.append('category', category || 'requirement')
   body.append('imported_by', importedBy)
   if (inputId) body.append('input_id', inputId)
-  return request(`/projects/${encodeURIComponent(projectId)}/inputs`, {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/inputs`,
+    moduleId,
+  ), {
     method: 'POST',
     body,
   })
 }
 
-export function getProjectInputPreview(projectId, inputId) {
-  return request(
+export function getProjectInputPreview(projectId, inputId, moduleId = null) {
+  return request(withModule(
     `/projects/${encodeURIComponent(projectId)}/inputs/${encodeURIComponent(inputId)}`,
-  )
+    moduleId,
+  ))
 }
 
-export function projectInputContentUrl(projectId, inputId) {
-  return `${API_BASE_URL}/projects/${encodeURIComponent(projectId)}/inputs/${encodeURIComponent(inputId)}/content`
+export function projectInputContentUrl(projectId, inputId, moduleId = null) {
+  const path = `/projects/${encodeURIComponent(projectId)}/inputs/${encodeURIComponent(inputId)}/content`
+  return `${API_BASE_URL}${withModule(path, moduleId)}`
 }
 
-export function runWorkflow(projectId, model = null) {
-  return request(`/projects/${encodeURIComponent(projectId)}/runs`, {
+export function runWorkflow(projectId, model = null, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/runs`,
+    moduleId,
+  ), {
     method: 'POST',
     body: JSON.stringify(model ? { model } : {}),
   })
 }
 
-export function getActiveArtifact(projectId, artifactType) {
-  return request(
+export function getActiveArtifact(projectId, artifactType, moduleId = null) {
+  return request(withModule(
     `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactType)}`,
-  )
+    moduleId,
+  ))
 }
 
-export function submitApproval(projectId, payload) {
-  return request(`/projects/${encodeURIComponent(projectId)}/approvals`, {
+export function submitApproval(projectId, payload, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/approvals`,
+    moduleId,
+  ), {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 }
 
-export function submitExecution(projectId, payload) {
-  return request(`/projects/${encodeURIComponent(projectId)}/executions`, {
+export function submitExecution(projectId, payload, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/executions`,
+    moduleId,
+  ), {
     method: 'POST',
     body: JSON.stringify(payload),
   })
 }
 
-export function uploadEvidence(projectId, file, { evidenceType, description, evidenceId } = {}) {
+export function uploadEvidence(
+  projectId,
+  file,
+  { evidenceType, description, evidenceId, moduleId } = {},
+) {
   const body = new FormData()
   body.append('file', file)
   body.append('evidence_type', evidenceType)
   body.append('description', description)
   if (evidenceId) body.append('evidence_id', evidenceId)
-  return request(`/projects/${encodeURIComponent(projectId)}/evidence`, {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/evidence`,
+    moduleId,
+  ), {
     method: 'POST',
     body,
   })

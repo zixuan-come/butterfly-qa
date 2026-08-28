@@ -1,4 +1,4 @@
-"""Main-flow orchestration for the Butterfly QA workflow."""
+"""Main-flow orchestration for the Butterfly Agent workflow."""
 
 from __future__ import annotations
 

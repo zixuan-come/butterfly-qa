@@ -6,7 +6,7 @@
 
 - Python：Conda `py310`
 - `openai-codex`：`0.147.0`
-- Butterfly QA：仓库源码运行
+- Butterfly Agent：仓库源码运行
 - 联调项目：`integration-address-change`
 - 原始需求：`docs/示例-修改收货地址需求.md`
 

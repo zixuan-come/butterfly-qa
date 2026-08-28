@@ -1,0 +1,12 @@
+services:
+  butterfly-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: butterfly-agent:local
+    ports:
+      - "${BUTTERFLY_QA_PORT:-8000}:8000"
+    environment:
+      PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped

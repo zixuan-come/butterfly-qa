@@ -1,4 +1,4 @@
-"""Codex SDK adapter for the Butterfly QA agent protocol."""
+"""Codex SDK adapter for the Butterfly Agent agent protocol."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class CodexAgentRunner(AgentRunner):
                     cwd=str(working_directory),
                     sandbox=self._sandbox_read_only(),
                     developer_instructions=(
-                        "你是 Butterfly QA 的一个受控专业 Agent。"
+                        "你是 Butterfly Agent 的一个受控专业 Agent。"
                         "只输出当前任务要求的结果，不要修改项目文件，不要推进工作流状态。"
                     ),
                 )

@@ -1,4 +1,4 @@
-"""Command-line interface for operating a local Butterfly QA workflow."""
+"""Command-line interface for operating a local Butterfly Agent workflow."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ from .workflow.models import WorkflowRun
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="butterfly-qa",
-        description="Butterfly QA 本地测试流程编排工具",
+        description="Butterfly Agent 本地测试流程编排工具",
     )
     parser.add_argument(
         "--workspace",
@@ -130,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit_execution.add_argument("path")
     submit_execution.set_defaults(handler=_submit_execution)
 
-    web = commands.add_parser("web", help="启动 Butterfly QA Web 工作台")
+    web = commands.add_parser("web", help="启动 Butterfly Agent Web 工作台")
     web.add_argument("--host", default="127.0.0.1", help="监听地址")
     web.add_argument("--port", default=8000, type=int, help="监听端口")
     web.add_argument(
@@ -358,7 +358,7 @@ def _serve_web(args: argparse.Namespace) -> int:
     workspace = _workspace(args)
     browser_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
     url = f"http://{browser_host}:{args.port}/"
-    print(f"Butterfly QA Web 工作台：{url}")
+    print(f"Butterfly Agent Web 工作台：{url}")
     print("按 Ctrl+C 停止服务。")
     if not args.no_open:
         threading.Thread(

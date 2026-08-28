@@ -1,4 +1,4 @@
-"""FastAPI application exposing the existing Butterfly QA domain services."""
+"""FastAPI application exposing the existing Butterfly Agent domain services."""
 
 from __future__ import annotations
 
@@ -27,7 +27,14 @@ from ..human_actions import (
     ManualExecutionService,
 )
 from ..orchestrator import WorkflowOrchestrator
-from ..project import InputCategory, ProjectInput, ProjectManager, ProjectRecord
+from ..project import (
+    FeatureModuleManager,
+    FeatureModuleRecord,
+    InputCategory,
+    ProjectInput,
+    ProjectManager,
+    ProjectRecord,
+)
 from ..schemas import (
     ApprovalType,
     ArtifactMeta,
@@ -44,8 +51,12 @@ from .models import (
     AgentRunSummary,
     ApiResponse,
     ApprovalData,
+    CreateFeatureModuleRequest,
     CreateProjectRequest,
     EvidenceData,
+    FeatureModuleDetail,
+    FeatureModuleListData,
+    FeatureModuleSummary,
     ExecutionData,
     HealthData,
     ProjectDetail,
@@ -116,7 +127,7 @@ def create_app(
         workspace or os.environ.get("BUTTERFLY_QA_WORKSPACE", ".")
     ).resolve()
     app = FastAPI(
-        title="Butterfly QA API",
+        title="Butterfly Agent API",
         version=APP_VERSION,
         docs_url="/api/docs",
         redoc_url=None,
@@ -294,6 +305,108 @@ def create_app(
         return _success(request, _project_detail(project, workflow))
 
     @app.post(
+        f"{API_PREFIX}/projects/{{project_id}}/modules",
+        response_model=ApiResponse[FeatureModuleDetail],
+        status_code=status.HTTP_201_CREATED,
+        tags=["feature-modules"],
+    )
+    async def create_feature_module(
+        project_id: str,
+        payload: CreateFeatureModuleRequest,
+        request: Request,
+    ) -> ApiResponse[FeatureModuleDetail]:
+        try:
+            manager = FeatureModuleManager(
+                request.app.state.workspace / "projects",
+                project_id,
+                payload.module_id,
+            )
+            module, workflow = manager.create_module(
+                payload.name,
+                created_by=payload.created_by,
+            )
+        except ArtifactStoreError as exc:
+            message = str(exc)
+            if "feature module already exists" in message:
+                raise ApiError(
+                    http_status=status.HTTP_409_CONFLICT,
+                    code="FEATURE_MODULE_ALREADY_EXISTS",
+                    message="功能模块已存在",
+                ) from exc
+            if "does not exist" in message:
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="PROJECT_NOT_FOUND",
+                    message="项目不存在",
+                ) from exc
+            raise
+        return _success(
+            request,
+            _feature_module_detail(module, workflow),
+            message="功能模块创建成功",
+        )
+
+    @app.get(
+        f"{API_PREFIX}/projects/{{project_id}}/modules",
+        response_model=ApiResponse[FeatureModuleListData],
+        tags=["feature-modules"],
+    )
+    async def list_feature_modules(
+        project_id: str,
+        request: Request,
+    ) -> ApiResponse[FeatureModuleListData]:
+        project_manager = _project_manager(request)
+        _load_project(project_manager, project_id)
+        items: list[FeatureModuleSummary] = []
+        modules_root = project_manager.store.project_root(project_id) / "modules"
+        if modules_root.is_dir():
+            for manifest_path in modules_root.glob("*/module.json"):
+                try:
+                    manager = FeatureModuleManager(
+                        project_manager.store.projects_root,
+                        project_id,
+                        manifest_path.parent.name,
+                    )
+                    module = manager.load_module()
+                    workflow = manager.load_workflow(project_id)
+                except (ArtifactStoreError, ValueError):
+                    continue
+                items.append(_feature_module_summary(module, workflow))
+        items.sort(key=lambda item: item.updated_at, reverse=True)
+        return _success(
+            request,
+            FeatureModuleListData(items=items, total=len(items)),
+        )
+
+    @app.get(
+        f"{API_PREFIX}/projects/{{project_id}}/modules/{{module_id}}",
+        response_model=ApiResponse[FeatureModuleDetail],
+        tags=["feature-modules"],
+    )
+    async def get_feature_module(
+        project_id: str,
+        module_id: str,
+        request: Request,
+    ) -> ApiResponse[FeatureModuleDetail]:
+        try:
+            manager = FeatureModuleManager(
+                request.app.state.workspace / "projects",
+                project_id,
+                module_id,
+            )
+            module = manager.load_module()
+            workflow = manager.load_workflow(project_id)
+        except ArtifactStoreError as exc:
+            if "does not exist" in str(exc):
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="FEATURE_MODULE_NOT_FOUND",
+                    message="功能模块不存在",
+                ) from exc
+            raise
+        return _success(request, _feature_module_detail(module, workflow))
+
+    @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/inputs",
         response_model=ApiResponse[ProjectInputData],
         status_code=status.HTTP_201_CREATED,
@@ -306,8 +419,9 @@ def create_app(
         category: Annotated[InputCategory, Form()],
         imported_by: Annotated[str, Form(min_length=1, max_length=120)],
         input_id: Annotated[str | None, Form()] = None,
+        module_id: str | None = None,
     ) -> ApiResponse[ProjectInputData]:
-        manager = _project_manager(request)
+        manager = _context_manager(request, project_id, module_id)
         _load_project(manager, project_id)
         temporary_path = await _receive_upload(request, file)
         try:
@@ -345,9 +459,11 @@ def create_app(
         project_id: str,
         input_id: str,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[ProjectInputPreviewData]:
-        store = _artifact_store(request)
-        project, _ = _load_project(ProjectManager(store.projects_root), project_id)
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+        project, _ = _load_project(manager, project_id)
         project_input = _find_project_input(project, input_id)
         path = _project_input_path(store, project_id, project_input)
         preview_kind = _input_preview_kind(project_input.media_type)
@@ -369,6 +485,7 @@ def create_app(
                 content=content,
                 content_url=(
                     f"{API_PREFIX}/projects/{project_id}/inputs/{input_id}/content"
+                    f"{'?module_id=' + module_id if module_id else ''}"
                 ),
                 truncated=truncated,
             ),
@@ -383,9 +500,11 @@ def create_app(
         project_id: str,
         input_id: str,
         request: Request,
+        module_id: str | None = None,
     ) -> FileResponse:
-        store = _artifact_store(request)
-        project, _ = _load_project(ProjectManager(store.projects_root), project_id)
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+        project, _ = _load_project(manager, project_id)
         project_input = _find_project_input(project, input_id)
         path = _project_input_path(store, project_id, project_input)
         return FileResponse(
@@ -406,10 +525,11 @@ def create_app(
     async def get_workflow_status(
         project_id: str,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[WorkflowStatusData]:
-        manager = _project_manager(request)
+        manager = _context_manager(request, project_id, module_id)
         _, workflow = _load_project(manager, project_id)
-        return _success(request, _workflow_status(workflow))
+        return _success(request, _workflow_status(workflow, module_id))
 
     @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/runs",
@@ -420,11 +540,12 @@ def create_app(
         project_id: str,
         payload: RunWorkflowRequest,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[WorkflowStepData]:
         workspace = request.app.state.workspace
-        store = ArtifactStore(workspace / "projects")
-        with _project_lock(request, project_id):
-            manager = ProjectManager(store.projects_root)
+        store = _artifact_store(request, module_id)
+        with _project_lock(request, project_id, module_id):
+            manager = _context_manager(request, project_id, module_id)
             _, workflow = _load_project(manager, project_id)
             runner = request.app.state.runner_factory(workspace, store)
             result = WorkflowOrchestrator(
@@ -482,10 +603,11 @@ def create_app(
         project_id: str,
         payload: SubmitApprovalRequest,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[ApprovalData]:
-        store = _artifact_store(request)
-        with _project_lock(request, project_id):
-            manager = ProjectManager(store.projects_root)
+        store = _artifact_store(request, module_id)
+        with _project_lock(request, project_id, module_id):
+            manager = _context_manager(request, project_id, module_id)
             _, workflow = _load_project(manager, project_id)
             target_type = _APPROVAL_TARGET_TYPES.get(payload.approval_type)
             if target_type is None:
@@ -551,10 +673,11 @@ def create_app(
         project_id: str,
         payload: SubmitExecutionRequest,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[ExecutionData]:
-        store = _artifact_store(request)
-        with _project_lock(request, project_id):
-            manager = ProjectManager(store.projects_root)
+        store = _artifact_store(request, module_id)
+        with _project_lock(request, project_id, module_id):
+            manager = _context_manager(request, project_id, module_id)
             _, workflow = _load_project(manager, project_id)
             design = workflow.active_artifacts.get("test_design")
             if design is None:
@@ -614,12 +737,14 @@ def create_app(
         evidence_type: Annotated[str, Form()],
         description: Annotated[str, Form(min_length=1, max_length=2000)],
         evidence_id: Annotated[str | None, Form()] = None,
+        module_id: str | None = None,
     ) -> ApiResponse[EvidenceData]:
-        store = _artifact_store(request)
-        _load_project(ProjectManager(store.projects_root), project_id)
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+        _load_project(manager, project_id)
         temporary_path = await _receive_upload(request, file)
         try:
-            with _project_lock(request, project_id):
+            with _project_lock(request, project_id, module_id):
                 evidence = EvidenceService(store).import_file(
                     project_id,
                     temporary_path,
@@ -666,9 +791,11 @@ def create_app(
         project_id: str,
         artifact_type: str,
         request: Request,
+        module_id: str | None = None,
     ) -> ApiResponse[ActiveArtifactData]:
-        store = _artifact_store(request)
-        _, workflow = _load_project(ProjectManager(store.projects_root), project_id)
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+        _, workflow = _load_project(manager, project_id)
         pointer = workflow.active_artifacts.get(artifact_type)
         if pointer is None:
             raise ApiError(
@@ -731,11 +858,42 @@ def _project_manager(request: Request) -> ProjectManager:
     return ProjectManager(request.app.state.workspace / "projects")
 
 
-def _artifact_store(request: Request) -> ArtifactStore:
-    return ArtifactStore(request.app.state.workspace / "projects")
+def _context_manager(
+    request: Request,
+    project_id: str,
+    module_id: str | None,
+) -> ProjectManager | FeatureModuleManager:
+    if module_id is None:
+        return _project_manager(request)
+    return _feature_module_manager(request, project_id, module_id)
 
 
-def _find_project_input(project: ProjectRecord, input_id: str) -> ProjectInput:
+def _feature_module_manager(
+    request: Request,
+    project_id: str,
+    module_id: str,
+) -> FeatureModuleManager:
+    return FeatureModuleManager(
+        request.app.state.workspace / "projects",
+        project_id,
+        module_id,
+    )
+
+
+def _artifact_store(
+    request: Request,
+    module_id: str | None = None,
+) -> ArtifactStore:
+    return ArtifactStore(
+        request.app.state.workspace / "projects",
+        module_id=module_id,
+    )
+
+
+def _find_project_input(
+    project: ProjectRecord | FeatureModuleRecord,
+    input_id: str,
+) -> ProjectInput:
     project_input = next(
         (item for item in project.inputs if item.input_id == input_id),
         None,
@@ -792,17 +950,22 @@ def _input_preview_kind(media_type: str) -> str:
 
 
 def _load_project(
-    manager: ProjectManager,
+    manager: ProjectManager | FeatureModuleManager,
     project_id: str,
-) -> tuple[ProjectRecord, WorkflowRun]:
+) -> tuple[ProjectRecord | FeatureModuleRecord, WorkflowRun]:
     try:
         return manager.load_project(project_id), manager.load_workflow(project_id)
     except ArtifactStoreError as exc:
         if "does not exist" in str(exc):
+            is_module = isinstance(manager, FeatureModuleManager)
             raise ApiError(
                 http_status=status.HTTP_404_NOT_FOUND,
-                code="PROJECT_NOT_FOUND",
-                message="项目不存在",
+                code=(
+                    "FEATURE_MODULE_NOT_FOUND"
+                    if is_module
+                    else "PROJECT_NOT_FOUND"
+                ),
+                message="功能模块不存在" if is_module else "项目不存在",
             ) from exc
         raise
 
@@ -832,10 +995,14 @@ async def _receive_upload(request: Request, upload: UploadFile) -> Path:
     return temporary_path
 
 
-def _workflow_status(workflow: WorkflowRun) -> WorkflowStatusData:
+def _workflow_status(
+    workflow: WorkflowRun,
+    module_id: str | None = None,
+) -> WorkflowStatusData:
     available_states = WorkflowStateMachine(workflow).available_states()
     return WorkflowStatusData(
         project_id=workflow.project_id,
+        module_id=module_id,
         workflow_id=workflow.workflow_id,
         state=workflow.current_state.value,
         awaiting_human=workflow.current_state in _HUMAN_STATES,
@@ -868,9 +1035,14 @@ def _default_runner_factory(
     )
 
 
-def _project_lock(request: Request, project_id: str) -> Lock:
+def _project_lock(
+    request: Request,
+    project_id: str,
+    module_id: str | None = None,
+) -> Lock:
     locks: dict[str, Lock] = request.app.state.project_locks
-    return locks.setdefault(project_id, Lock())
+    context_id = f"{project_id}:{module_id or '__v1__'}"
+    return locks.setdefault(context_id, Lock())
 
 
 def _project_relative_path(
@@ -883,6 +1055,43 @@ def _project_relative_path(
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except ValueError:
         return None
+
+
+def _feature_module_summary(
+    module: FeatureModuleRecord,
+    workflow: WorkflowRun,
+) -> FeatureModuleSummary:
+    return FeatureModuleSummary(
+        module_id=module.module_id,
+        project_id=module.project_id,
+        name=module.name,
+        state=workflow.current_state.value,
+        created_by=module.created_by,
+        created_at=module.created_at,
+        updated_at=module.updated_at,
+        input_count=len(workflow.input_files),
+        active_artifact_count=len(workflow.active_artifacts),
+    )
+
+
+def _feature_module_detail(
+    module: FeatureModuleRecord,
+    workflow: WorkflowRun,
+) -> FeatureModuleDetail:
+    summary = _feature_module_summary(module, workflow)
+    return FeatureModuleDetail(
+        **summary.model_dump(),
+        workflow_id=workflow.workflow_id,
+        active_artifacts={
+            name: pointer.model_dump(mode="json")
+            for name, pointer in workflow.active_artifacts.items()
+        },
+        revision_rounds={
+            "requirement": workflow.requirement_revision_rounds,
+            "testcase": workflow.testcase_revision_rounds,
+            "report": workflow.report_revision_rounds,
+        },
+    )
 
 
 def _project_summary(

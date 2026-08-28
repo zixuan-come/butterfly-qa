@@ -18,7 +18,7 @@ from .workflow.models import InputFilePointer, WorkflowRun
 
 
 class InputCategory(str, Enum):
-    """Kinds of source material accepted by a Butterfly QA project."""
+    """Kinds of source material accepted by a Butterfly Agent project."""
 
     REQUIREMENT = "requirement"
     DESIGN = "design"
@@ -56,6 +56,20 @@ class ProjectRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    project_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str = Field(min_length=1)
+    created_by: str = Field(min_length=1)
+    created_at: datetime
+    updated_at: datetime
+    inputs: list[ProjectInput] = Field(default_factory=list)
+
+
+class FeatureModuleRecord(BaseModel):
+    """Independent workflow context nested under a project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    module_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
     project_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
     name: str = Field(min_length=1)
     created_by: str = Field(min_length=1)
@@ -129,7 +143,7 @@ class ProjectManager:
         if not source.is_file():
             raise ArtifactStoreError(f"input source is not a file: {source}")
 
-        project = ProjectRecord.model_validate(self.store.load_project(project_id))
+        project = self._load_record(project_id)
         workflow = WorkflowRun.model_validate(self.store.load_workflow(project_id))
         resolved_input_id = input_id or f"input-{uuid4().hex}"
         if not self._SAFE_INPUT_ID.fullmatch(resolved_input_id):
@@ -159,15 +173,21 @@ class ProjectManager:
         project.updated_at = now
         workflow.input_files.append(imported.pointer())
         workflow.updated_at = now
-        self.store.save_project(project_id, project)
+        self._save_record(project_id, project)
         self.store.save_workflow(project_id, workflow)
         return imported
 
     def load_project(self, project_id: str) -> ProjectRecord:
-        return ProjectRecord.model_validate(self.store.load_project(project_id))
+        return self._load_record(project_id)
 
     def load_workflow(self, project_id: str) -> WorkflowRun:
         return WorkflowRun.model_validate(self.store.load_workflow(project_id))
+
+    def _load_record(self, project_id: str) -> ProjectRecord:
+        return ProjectRecord.model_validate(self.store.load_project(project_id))
+
+    def _save_record(self, project_id: str, project: ProjectRecord) -> None:
+        self.store.save_project(project_id, project)
 
     @staticmethod
     def _copy_immutable(source: Path, target: Path) -> tuple[str, int]:
@@ -196,3 +216,84 @@ class ProjectManager:
             or mimetypes.guess_type(source.name)[0]
             or "application/octet-stream"
         )
+
+
+class FeatureModuleManager(ProjectManager):
+    """Create and load isolated feature workflows within one project."""
+
+    def __init__(
+        self,
+        projects_root: str | Path,
+        project_id: str,
+        module_id: str,
+    ) -> None:
+        parent_store = ArtifactStore(projects_root)
+        parent_store.load_project(project_id)
+        self.project_id = project_id
+        self.store = ArtifactStore(projects_root, module_id=module_id)
+        self.module_id = self.store.module_id
+
+    def create_module(
+        self,
+        name: str,
+        *,
+        created_by: str,
+        created_at: datetime | None = None,
+    ) -> tuple[FeatureModuleRecord, WorkflowRun]:
+        now = created_at or datetime.now(timezone.utc)
+        module_root = self.store.project_root(self.project_id)
+        manifest_path = module_root / "module.json"
+        workflow_path = module_root / "workflow.json"
+        if manifest_path.exists() or workflow_path.exists():
+            raise ArtifactStoreError(
+                f"feature module already exists: {self.module_id}"
+            )
+
+        module = FeatureModuleRecord(
+            module_id=self.module_id,
+            project_id=self.project_id,
+            name=name,
+            created_by=created_by,
+            created_at=now,
+            updated_at=now,
+        )
+        workflow = WorkflowRun(
+            workflow_id=f"wf-{uuid4().hex}",
+            project_id=self.project_id,
+            created_at=now,
+            updated_at=now,
+        )
+        for directory in ("input", "artifacts", "evidence", "decisions"):
+            (module_root / directory).mkdir(parents=True, exist_ok=True)
+        self.store.save_module(self.project_id, module)
+        self.store.save_workflow(self.project_id, workflow)
+        return module, workflow
+
+    def load_module(self) -> FeatureModuleRecord:
+        return self._load_record(self.project_id)
+
+    def load_project(self, project_id: str) -> FeatureModuleRecord:
+        self._require_project(project_id)
+        return self._load_record(project_id)
+
+    def load_workflow(self, project_id: str) -> WorkflowRun:
+        self._require_project(project_id)
+        return super().load_workflow(project_id)
+
+    def _load_record(self, project_id: str) -> FeatureModuleRecord:
+        self._require_project(project_id)
+        return FeatureModuleRecord.model_validate(self.store.load_module(project_id))
+
+    def _save_record(
+        self,
+        project_id: str,
+        project: FeatureModuleRecord,
+    ) -> None:
+        self._require_project(project_id)
+        self.store.save_module(project_id, project)
+
+    def _require_project(self, project_id: str) -> None:
+        if project_id != self.project_id:
+            raise ArtifactStoreError(
+                f"feature module belongs to project: {self.project_id}"
+            )

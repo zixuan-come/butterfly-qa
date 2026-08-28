@@ -363,7 +363,8 @@ p {
   top: calc(100% - 8px);
   right: 0;
   left: 0;
-  overflow: hidden;
+  max-height: min(68vh, 520px);
+  overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
@@ -426,6 +427,105 @@ p {
 .project-option.active svg {
   flex: 0 0 auto;
   color: var(--success);
+}
+
+.module-branch {
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+}
+
+.module-menu-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px 4px 16px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.module-add-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--primary);
+}
+
+.module-add-button:hover {
+  background: var(--primary-soft);
+}
+
+.module-option,
+.module-create-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px 7px 18px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.module-option > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.module-option strong,
+.module-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.module-option strong {
+  font-size: 11px;
+}
+
+.module-option small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.module-option:hover,
+.module-option.active,
+.module-create-option:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.module-option.active > svg {
+  flex: 0 0 auto;
+  color: var(--success);
+}
+
+.module-tree-mark {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--surface);
+}
+
+.module-option.active .module-tree-mark {
+  border-color: var(--primary);
+  background: var(--primary);
+}
+
+.module-create-option {
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .project-create-option {

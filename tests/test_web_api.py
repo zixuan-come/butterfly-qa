@@ -618,3 +618,124 @@ def test_active_artifact_returns_json_and_optional_markdown(tmp_path):
     assert response.json()["data"]["markdown_path"].endswith("v1.md")
     assert missing.status_code == 404
     assert missing.json()["code"] == "ACTIVE_ARTIFACT_NOT_FOUND"
+def test_feature_module_create_list_detail_and_duplicate_conflict(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "commerce")
+        checkout = client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "checkout",
+                "name": "结算",
+                "created_by": "tester-001",
+            },
+        )
+        profile = client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "profile",
+                "name": "个人资料",
+                "created_by": "tester-002",
+            },
+        )
+        duplicate = client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "checkout",
+                "name": "重复结算",
+                "created_by": "tester-001",
+            },
+        )
+        listed = client.get("/api/v1/projects/commerce/modules")
+        detail = client.get("/api/v1/projects/commerce/modules/checkout")
+
+    assert checkout.status_code == 201
+    assert checkout.json()["data"]["module_id"] == "checkout"
+    assert checkout.json()["data"]["state"] == "requirement_received"
+    assert profile.status_code == 201
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "FEATURE_MODULE_ALREADY_EXISTS"
+    assert listed.status_code == 200
+    assert listed.json()["data"]["total"] == 2
+    assert {item["module_id"] for item in listed.json()["data"]["items"]} == {
+        "checkout",
+        "profile",
+    }
+    assert detail.status_code == 200
+    assert detail.json()["data"]["workflow_id"].startswith("wf-")
+
+
+def test_feature_module_input_and_workflow_are_isolated_from_v1_context(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "commerce")
+        created = client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "checkout",
+                "name": "结算",
+                "created_by": "tester-001",
+            },
+        )
+        uploaded = client.post(
+            "/api/v1/projects/commerce/inputs",
+            params={"module_id": "checkout"},
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "checkout-requirement",
+            },
+            files={"file": ("checkout.md", "# 结算需求", "text/markdown")},
+        )
+        module_workflow = client.get(
+            "/api/v1/projects/commerce/workflow",
+            params={"module_id": "checkout"},
+        )
+        root_workflow = client.get("/api/v1/projects/commerce/workflow")
+        preview = client.get(
+            "/api/v1/projects/commerce/inputs/checkout-requirement",
+            params={"module_id": "checkout"},
+        )
+        missing_from_root = client.get(
+            "/api/v1/projects/commerce/inputs/checkout-requirement"
+        )
+
+    assert created.status_code == 201
+    assert uploaded.status_code == 201
+    assert module_workflow.status_code == 200
+    assert module_workflow.json()["data"]["module_id"] == "checkout"
+    assert module_workflow.json()["data"]["input_files"][0]["input_id"] == (
+        "checkout-requirement"
+    )
+    assert root_workflow.status_code == 200
+    assert root_workflow.json()["data"]["module_id"] is None
+    assert root_workflow.json()["data"]["input_files"] == []
+    assert preview.status_code == 200
+    assert preview.json()["data"]["content"] == "# 结算需求"
+    assert preview.json()["data"]["content_url"].endswith(
+        "?module_id=checkout"
+    )
+    assert missing_from_root.status_code == 404
+    assert missing_from_root.json()["code"] == "INPUT_NOT_FOUND"
+    assert (
+        tmp_path
+        / "projects"
+        / "commerce"
+        / "modules"
+        / "checkout"
+        / "input"
+        / "checkout-requirement.md"
+    ).is_file()
+
+
+def test_missing_feature_module_returns_module_not_found(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "commerce")
+        detail = client.get("/api/v1/projects/commerce/modules/missing")
+        workflow = client.get(
+            "/api/v1/projects/commerce/workflow",
+            params={"module_id": "missing"},
+        )
+
+    assert detail.status_code == 404
+    assert detail.json()["code"] == "FEATURE_MODULE_NOT_FOUND"
+    assert workflow.status_code == 404
+    assert workflow.json()["code"] == "FEATURE_MODULE_NOT_FOUND"

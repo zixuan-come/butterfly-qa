@@ -19,16 +19,36 @@ class ArtifactStore:
 
     _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-    def __init__(self, projects_root: str | Path) -> None:
+    def __init__(
+        self,
+        projects_root: str | Path,
+        *,
+        module_id: str | None = None,
+    ) -> None:
         self.projects_root = Path(projects_root).resolve()
+        self.module_id = (
+            self._validate_component(module_id, "module_id")
+            if module_id is not None
+            else None
+        )
         self.projects_root.mkdir(parents=True, exist_ok=True)
 
     def project_root(self, project_id: str) -> Path:
         self._validate_component(project_id, "project_id")
         project_root = (self.projects_root / project_id).resolve()
+        if self.module_id is not None:
+            project_root = (project_root / "modules" / self.module_id).resolve()
         if self.projects_root not in project_root.parents:
             raise ArtifactStoreError("project path escapes projects root")
         return project_root
+
+    def save_module(self, project_id: str, module: BaseModel | dict[str, Any]) -> Path:
+        path = self.project_root(project_id) / "module.json"
+        self._write_json(path, self._to_jsonable(module))
+        return path
+
+    def load_module(self, project_id: str) -> dict[str, Any]:
+        return self._read_json(self.project_root(project_id) / "module.json")
 
     def save_artifact(self, artifact: BaseModel) -> Path:
         """Save a versioned JSON artifact and update its latest pointer."""

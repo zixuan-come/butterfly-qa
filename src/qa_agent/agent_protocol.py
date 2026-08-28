@@ -11,7 +11,7 @@ from .workflow.states import WorkflowState
 
 
 class AgentRole(str, Enum):
-    """Business roles available in the Butterfly QA workflow."""
+    """Business roles available in the Butterfly Agent workflow."""
 
     MAIN_FLOW = "main_flow"
     TEST_ANALYSIS_DESIGN = "test_analysis_design"

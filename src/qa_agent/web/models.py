@@ -1,4 +1,4 @@
-"""Request and response models shared by Butterfly QA HTTP endpoints."""
+"""Request and response models shared by Butterfly Agent HTTP endpoints."""
 
 from __future__ import annotations
 
@@ -30,6 +30,37 @@ class CreateProjectRequest(BaseModel):
     project_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
     name: str = Field(min_length=1, max_length=120)
     created_by: str = Field(min_length=1, max_length=120)
+
+
+class CreateFeatureModuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    module_id: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
+    name: str = Field(min_length=1, max_length=120)
+    created_by: str = Field(min_length=1, max_length=120)
+
+
+class FeatureModuleSummary(BaseModel):
+    module_id: str
+    project_id: str
+    name: str
+    state: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    input_count: int = Field(ge=0)
+    active_artifact_count: int = Field(ge=0)
+
+
+class FeatureModuleDetail(FeatureModuleSummary):
+    workflow_id: str
+    active_artifacts: dict[str, dict[str, Any]]
+    revision_rounds: dict[str, int]
+
+
+class FeatureModuleListData(BaseModel):
+    items: list[FeatureModuleSummary]
+    total: int = Field(ge=0)
 
 
 class HealthData(BaseModel):
@@ -86,6 +117,7 @@ class ProjectInputPreviewData(BaseModel):
 
 class WorkflowStatusData(BaseModel):
     project_id: str
+    module_id: str | None = None
     workflow_id: str
     state: str
     awaiting_human: bool

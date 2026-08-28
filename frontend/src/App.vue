@@ -38,11 +38,13 @@ import {
 } from 'lucide-vue-next'
 import { stages as stageDefinitions } from './data'
 import {
+  createFeatureModule,
   createProject,
   getActiveArtifact,
   getProject,
   getProjectInputPreview,
   getWorkflow,
+  listFeatureModules,
   listProjects,
   projectInputContentUrl,
   runWorkflow,
@@ -142,6 +144,9 @@ const evidenceTarget = ref(null)
 const toast = ref('')
 const projects = ref([])
 const currentProject = ref(null)
+const modules = ref([])
+const currentModule = ref(null)
+let contextRequestId = 0
 const workflow = ref(null)
 const requirementInputPreview = ref(null)
 const artifacts = reactive({
@@ -153,14 +158,21 @@ const artifacts = reactive({
 })
 const projectMenuOpen = ref(false)
 const createProjectOpen = ref(false)
+const createModuleOpen = ref(false)
 const projectsLoading = ref(false)
 const creatingProject = ref(false)
+const creatingModule = ref(false)
 const uploadingRequirement = ref(false)
 const runningWorkflow = ref(false)
 const requirementFileInput = ref(null)
 const syncLabel = ref('正在连接')
 const newProject = reactive({
   project_id: '',
+  name: '',
+  created_by: '林子轩',
+})
+const newModule = reactive({
+  module_id: '',
   name: '',
   created_by: '林子轩',
 })
@@ -204,6 +216,12 @@ const stages = computed(() => stageDefinitions.map((stage, index) => {
 }))
 const activeStage = computed(() => stages.value.find((stage) => stage.id === activeStageId.value))
 const currentProjectName = computed(() => currentProject.value?.name || '尚未选择项目')
+const currentContextName = computed(() => (
+  currentModule.value?.name || currentProjectName.value
+))
+const currentContextId = computed(() => (
+  currentModule.value?.module_id || 'V1 兼容流程'
+))
 const currentStateLabel = computed(() => (
   stateLabels[workflow.value?.state] || (workflow.value ? workflow.value.state : '新建或选择项目')
 ))
@@ -351,6 +369,8 @@ async function loadProjects(preferredProjectId = null) {
       await selectProject(projectId)
     } else {
       currentProject.value = null
+      currentModule.value = null
+      modules.value = []
       workflow.value = null
       resetArtifacts()
       executionCases.value = []
@@ -364,67 +384,145 @@ async function loadProjects(preferredProjectId = null) {
   }
 }
 
-async function selectProject(projectId) {
+async function selectProject(projectId, preferredModuleId = undefined) {
+  const requestId = ++contextRequestId
   projectMenuOpen.value = false
   syncLabel.value = '正在同步'
   try {
-    const [projectData, workflowData] = await Promise.all([
+    const [projectData, moduleData] = await Promise.all([
       getProject(projectId),
-      getWorkflow(projectId),
+      listFeatureModules(projectId),
     ])
+    const storageKey = `butterfly-module-id:${projectId}`
+    const rememberedModuleId = localStorage.getItem(storageKey)
+    const requestedModuleId = preferredModuleId === undefined
+      ? rememberedModuleId
+      : preferredModuleId
+    const nextModule = moduleData.items.find(
+      (item) => item.module_id === requestedModuleId,
+    ) || (
+      preferredModuleId === undefined && !rememberedModuleId
+        ? moduleData.items[0] || null
+        : null
+    )
+    const workflowData = await getWorkflow(
+      projectId,
+      nextModule?.module_id,
+    )
+    if (requestId !== contextRequestId) return
     currentProject.value = projectData
-    workflow.value = workflowData
-    await Promise.all([
-      loadActiveArtifacts(workflowData),
-      loadRequirementPreview(workflowData),
-    ])
+    modules.value = moduleData.items
+    currentModule.value = nextModule
+    await applyWorkflowContext(workflowData, requestId)
+    if (requestId !== contextRequestId) return
     localStorage.setItem('butterfly-project-id', projectId)
-    activeStageId.value = stateStage[workflowData.state] || activeStageId.value
-    currentSteps[activeStageId.value] = stateStep[workflowData.state] || 0
-    syncLabel.value = '已同步'
+    if (currentModule.value) {
+      localStorage.setItem(storageKey, currentModule.value.module_id)
+    }
   } catch (error) {
+    if (requestId !== contextRequestId) return
     syncLabel.value = '同步失败'
     showToast(error.message)
   }
 }
-
+async function selectModule(moduleId) {
+  if (!currentProject.value) return
+  const requestId = ++contextRequestId
+  projectMenuOpen.value = false
+  syncLabel.value = '正在同步'
+  try {
+    const nextModule = modules.value.find(
+      (item) => item.module_id === moduleId,
+    ) || null
+    const workflowData = await getWorkflow(
+      currentProject.value.project_id,
+      nextModule?.module_id,
+    )
+    if (requestId !== contextRequestId) return
+    currentModule.value = nextModule
+    await applyWorkflowContext(workflowData, requestId)
+    if (requestId !== contextRequestId) return
+    const storageKey = `butterfly-module-id:${currentProject.value.project_id}`
+    if (currentModule.value) {
+      localStorage.setItem(storageKey, currentModule.value.module_id)
+    } else {
+      localStorage.removeItem(storageKey)
+    }
+  } catch (error) {
+    if (requestId !== contextRequestId) return
+    syncLabel.value = '同步失败'
+    showToast(error.message)
+  }
+}
+async function applyWorkflowContext(workflowData, requestId = contextRequestId) {
+  if (requestId !== contextRequestId) return
+  workflow.value = workflowData
+  await Promise.all([
+    loadActiveArtifacts(workflowData, requestId),
+    loadRequirementPreview(workflowData, requestId),
+  ])
+  if (requestId !== contextRequestId) return
+  activeStageId.value = stateStage[workflowData.state] || activeStageId.value
+  currentSteps[activeStageId.value] = stateStep[workflowData.state] || 0
+  syncLabel.value = '已同步'
+}
 async function refreshCurrentProject() {
   if (!currentProject.value) return
-  await selectProject(currentProject.value.project_id)
+  await selectProject(
+    currentProject.value.project_id,
+    currentModule.value?.module_id || null,
+  )
 }
 
-async function loadActiveArtifacts(workflowData) {
+async function loadActiveArtifacts(workflowData, requestId) {
+  if (requestId !== contextRequestId) return
   resetArtifacts()
   const artifactTypes = Object.keys(artifacts)
     .filter((artifactType) => workflowData.active_artifacts?.[artifactType])
   await Promise.all(artifactTypes.map(async (artifactType) => {
     try {
-      const result = await getActiveArtifact(workflowData.project_id, artifactType)
+      const result = await getActiveArtifact(
+        workflowData.project_id,
+        artifactType,
+        currentModule.value?.module_id,
+      )
+      if (requestId !== contextRequestId) return
       artifacts[artifactType] = result.content
     } catch (error) {
+      if (requestId !== contextRequestId) return
       artifacts[artifactType] = null
     }
   }))
+  if (requestId !== contextRequestId) return
   hydrateExecutionCases()
 }
-
-async function loadRequirementPreview(workflowData) {
+async function loadRequirementPreview(workflowData, requestId) {
+  if (requestId !== contextRequestId) return
   requirementInputPreview.value = null
   const requirementInputs = (workflowData.input_files || [])
     .filter((item) => item.category === 'requirement')
   const latest = requirementInputs[requirementInputs.length - 1]
   if (!latest) return
   try {
-    const preview = await getProjectInputPreview(workflowData.project_id, latest.input_id)
+    const preview = await getProjectInputPreview(
+      workflowData.project_id,
+      latest.input_id,
+      currentModule.value?.module_id,
+    )
+    if (requestId !== contextRequestId) return
     requirementInputPreview.value = {
       ...preview,
-      resolvedContentUrl: projectInputContentUrl(workflowData.project_id, latest.input_id),
+      resolvedContentUrl: projectInputContentUrl(
+        workflowData.project_id,
+        latest.input_id,
+        currentModule.value?.module_id,
+      ),
     }
   } catch (error) {
+    if (requestId !== contextRequestId) return
     requirementInputPreview.value = null
   }
 }
-
 function resetArtifacts() {
   Object.keys(artifacts).forEach((artifactType) => {
     artifacts[artifactType] = null
@@ -462,11 +560,45 @@ async function submitNewProject() {
     const created = await createProject({ ...newProject })
     createProjectOpen.value = false
     await loadProjects(created.project_id)
-    showToast('项目创建成功')
+    openCreateModule()
+    showToast('项目已创建，请添加第一个功能模块')
   } catch (error) {
     showToast(error.message)
   } finally {
     creatingProject.value = false
+  }
+}
+
+function openCreateModule() {
+  if (!currentProject.value) {
+    openCreateProject()
+    return
+  }
+  projectMenuOpen.value = false
+  newModule.module_id = ''
+  newModule.name = ''
+  newModule.created_by = newProject.created_by
+  createModuleOpen.value = true
+}
+
+async function submitNewModule() {
+  if (!currentProject.value) return
+  creatingModule.value = true
+  try {
+    const created = await createFeatureModule(
+      currentProject.value.project_id,
+      { ...newModule },
+    )
+    createModuleOpen.value = false
+    await selectProject(
+      currentProject.value.project_id,
+      created.module_id,
+    )
+    showToast('功能模块创建成功')
+  } catch (error) {
+    showToast(error.message)
+  } finally {
+    creatingModule.value = false
   }
 }
 
@@ -487,6 +619,7 @@ async function handleRequirementFile(event) {
     await uploadProjectInput(currentProject.value.project_id, file, {
       category: 'requirement',
       importedBy: newProject.created_by,
+      moduleId: currentModule.value?.module_id,
     })
     await refreshCurrentProject()
     showToast(
@@ -510,7 +643,11 @@ async function continueWorkflow() {
   runningWorkflow.value = true
   syncLabel.value = 'Agent 运行中'
   try {
-    const result = await runWorkflow(currentProject.value.project_id)
+    const result = await runWorkflow(
+      currentProject.value.project_id,
+      null,
+      currentModule.value?.module_id,
+    )
     await refreshCurrentProject()
     const reason = result.action?.reason || '流程步骤执行完成'
     showToast(reason)
@@ -565,7 +702,7 @@ async function submitApprovalAction(approvalType, decision, comment = '') {
       decision,
       decided_by: newProject.created_by,
       comment,
-    })
+    }, currentModule.value?.module_id)
     approvalDialog.open = false
     reviewApproved.value = false
     reportApproved.value = false
@@ -599,6 +736,7 @@ async function handleEvidenceFile(event) {
     const evidence = await uploadEvidence(currentProject.value.project_id, file, {
       evidenceType: inferEvidenceType(file),
       description: `${target.id} 执行证据：${file.name}`,
+      moduleId: currentModule.value?.module_id,
     })
     target.evidence.push(evidence)
     showToast(`${target.id} 已上传证据`)
@@ -630,7 +768,7 @@ async function submitExecutionResults() {
         evidence: item.evidence,
         notes: [],
       })),
-    })
+    }, currentModule.value?.module_id)
     await refreshCurrentProject()
     showToast('执行结果已提交，正在等待生成测试报告')
   } catch (error) {
@@ -708,7 +846,7 @@ function inferEvidenceType(file) {
         </button>
         <div class="brand-mark" aria-hidden="true"><Sparkles :size="18" /></div>
         <div>
-          <div class="brand-name">Butterfly QA</div>
+          <div class="brand-name">Butterfly Agent</div>
           <div class="brand-caption">智能测试全流程工作台</div>
         </div>
       </div>
@@ -739,13 +877,13 @@ function inferEvidenceType(file) {
         <button
           class="project-context"
           type="button"
-          :aria-label="`当前项目：${currentProjectName}`"
+          :aria-label="`当前上下文：${currentProjectName} / ${currentContextName}`"
           :aria-expanded="projectMenuOpen"
           @click="projectMenuOpen = !projectMenuOpen"
         >
-          <span class="project-context-top"><span class="project-label">当前项目</span><ChevronDown :size="13" :class="{ rotated: projectMenuOpen }" /></span>
-          <strong>{{ currentProjectName }}</strong>
-          <span class="project-id">{{ currentProject?.project_id || '未选择' }} · {{ currentStateLabel }}</span>
+          <span class="project-context-top"><span class="project-label">当前上下文</span><ChevronDown :size="13" :class="{ rotated: projectMenuOpen }" /></span>
+          <strong>{{ currentContextName }}</strong>
+          <span class="project-id">{{ currentProject?.project_id || '未选择' }} / {{ currentContextId }} · {{ currentStateLabel }}</span>
         </button>
         <div v-if="projectMenuOpen" class="project-menu">
           <div class="project-menu-heading">项目列表</div>
@@ -761,6 +899,39 @@ function inferEvidenceType(file) {
             <Check v-if="project.project_id === currentProject?.project_id" :size="14" />
           </button>
           <div v-if="!projects.length && !projectsLoading" class="project-menu-empty">暂无项目</div>
+          <div v-if="currentProject" class="module-branch">
+            <div class="module-menu-heading">
+              <span>功能模块</span>
+              <button class="module-add-button" type="button" title="新建功能模块" @click="openCreateModule">
+                <Plus :size="14" />
+              </button>
+            </div>
+            <button
+              class="module-option"
+              :class="{ active: !currentModule }"
+              type="button"
+              @click="selectModule(null)"
+            >
+              <span class="module-tree-mark"></span>
+              <span><strong>V1 兼容流程</strong><small>项目根级上下文</small></span>
+              <Check v-if="!currentModule" :size="14" />
+            </button>
+            <button
+              v-for="module in modules"
+              :key="module.module_id"
+              class="module-option"
+              :class="{ active: module.module_id === currentModule?.module_id }"
+              type="button"
+              @click="selectModule(module.module_id)"
+            >
+              <span class="module-tree-mark"></span>
+              <span><strong>{{ module.name }}</strong><small>{{ module.module_id }} · {{ stateLabels[module.state] || module.state }}</small></span>
+              <Check v-if="module.module_id === currentModule?.module_id" :size="14" />
+            </button>
+            <button class="module-create-option" type="button" @click="openCreateModule">
+              <Plus :size="14" />新建功能模块
+            </button>
+          </div>
           <button class="project-create-option" type="button" @click="openCreateProject">
             <Plus :size="15" />新建项目
           </button>
@@ -797,8 +968,8 @@ function inferEvidenceType(file) {
         <div class="summary-row"><span>流程进度</span><strong>{{ workflowProgress }}%</strong></div>
         <div class="progress-track"><span :style="{ width: `${workflowProgress}%` }"></span></div>
         <div class="summary-grid">
-          <div><strong>{{ currentProject?.input_count || 0 }}</strong><span>输入资料</span></div>
-          <div><strong>{{ currentProject?.active_artifact_count || 0 }}</strong><span>当前产物</span></div>
+          <div><strong>{{ workflow?.input_files?.length || 0 }}</strong><span>输入资料</span></div>
+          <div><strong>{{ Object.keys(workflow?.active_artifacts || {}).length }}</strong><span>当前产物</span></div>
           <div><strong class="success-text">{{ workflow?.transition_history?.length || 0 }}</strong><span>状态变更</span></div>
         </div>
       </div>
@@ -807,7 +978,13 @@ function inferEvidenceType(file) {
     <main id="main-workspace" class="workspace">
       <section class="stage-heading">
         <div>
-          <div class="breadcrumb">{{ currentProjectName }} <ChevronRight :size="13" /> {{ activeStage.title }}</div>
+          <div class="breadcrumb">
+            <span>{{ currentProjectName }}</span>
+            <ChevronRight :size="13" />
+            <span>{{ currentContextId }}</span>
+            <ChevronRight :size="13" />
+            <span>{{ activeStage.title }}</span>
+          </div>
           <div class="title-line">
             <h1>{{ activeStage.title }}</h1>
             <span class="stage-status" :class="activeStage.tone"><span></span>{{ activeStage.status }}</span>
@@ -1174,7 +1351,7 @@ function inferEvidenceType(file) {
     <div v-if="createProjectOpen" class="modal-scrim" @click.self="createProjectOpen = false">
       <form class="modal-dialog" @submit.prevent="submitNewProject">
         <div class="modal-header">
-          <div><div class="eyebrow">Butterfly QA</div><h2>新建测试项目</h2></div>
+          <div><div class="eyebrow">Butterfly Agent</div><h2>新建测试项目</h2></div>
           <button class="icon-button" type="button" title="关闭" @click="createProjectOpen = false"><X :size="18" /></button>
         </div>
         <label class="form-field">
@@ -1195,6 +1372,35 @@ function inferEvidenceType(file) {
           <button class="button primary" type="submit" :disabled="creatingProject">
             <LoaderCircle v-if="creatingProject" class="spin" :size="16" />
             <template v-else>创建项目</template>
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="createModuleOpen" class="modal-scrim" @click.self="createModuleOpen = false">
+      <form class="modal-dialog" @submit.prevent="submitNewModule">
+        <div class="modal-header">
+          <div><div class="eyebrow">{{ currentProjectName }}</div><h2>新建功能模块</h2></div>
+          <button class="icon-button" type="button" title="关闭" @click="createModuleOpen = false"><X :size="18" /></button>
+        </div>
+        <label class="form-field">
+          <span>功能模块名称</span>
+          <input v-model.trim="newModule.name" required maxlength="120" placeholder="例如：收货地址管理" />
+        </label>
+        <label class="form-field">
+          <span>模块 ID</span>
+          <input v-model.trim="newModule.module_id" required pattern="[A-Za-z0-9_.\-]+" placeholder="例如：address-management" />
+          <small>模块拥有独立的需求、测试点、用例、证据和报告上下文</small>
+        </label>
+        <label class="form-field">
+          <span>创建人</span>
+          <input v-model.trim="newModule.created_by" required maxlength="120" />
+        </label>
+        <div class="modal-actions">
+          <button class="button secondary" type="button" @click="createModuleOpen = false">取消</button>
+          <button class="button primary" type="submit" :disabled="creatingModule">
+            <LoaderCircle v-if="creatingModule" class="spin" :size="16" />
+            <template v-else>创建功能模块</template>
           </button>
         </div>
       </form>
