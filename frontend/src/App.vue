@@ -169,12 +169,12 @@ const syncLabel = ref('正在连接')
 const newProject = reactive({
   project_id: '',
   name: '',
-  created_by: '林子轩',
+  created_by: 'admin',
 })
 const newModule = reactive({
   module_id: '',
   name: '',
-  created_by: '林子轩',
+  created_by: 'admin',
 })
 const approvalDialog = reactive({
   open: false,
@@ -788,7 +788,7 @@ function selectFinding(id) {
 
 function updateExecutionResult(item, result) {
   item.result = result
-  if (item.executor === '待分配') item.executor = '林子轩'
+  if (item.executor === '待分配') item.executor = 'admin'
   if (result === '通过' && !item.actualResult) item.actualResult = '结果符合预期'
   if (result !== '通过' && item.actualResult === '结果符合预期') item.actualResult = ''
   showToast(`${item.id} 已标记为${result}`)
@@ -863,7 +863,7 @@ function inferEvidenceType(file) {
           <Bell :size="18" />
           <span class="notification-dot"></span>
         </button>
-        <div class="user-avatar" title="当前用户：林子轩">林</div>
+        <div class="user-avatar" title="当前用户：admin">A</div>
       </div>
     </header>
 
