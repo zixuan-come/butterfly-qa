@@ -160,3 +160,42 @@ def test_feature_module_inputs_are_isolated_from_other_modules_and_v1(tmp_path):
     assert profile_manager.load_workflow("commerce").input_files == []
     assert project_manager.load_project("commerce").inputs == []
     assert project_manager.load_workflow("commerce").input_files == []
+
+def test_project_can_be_renamed_and_deleted_with_all_data(tmp_path):
+    projects_root = tmp_path / "projects"
+    manager = ProjectManager(projects_root)
+    manager.create_project("demo", "旧项目名", created_by="tester-001")
+    FeatureModuleManager(projects_root, "demo", "checkout").create_module(
+        "结算",
+        created_by="tester-001",
+    )
+
+    updated = manager.update_project("demo", name="新项目名")
+    assert updated.name == "新项目名"
+    assert manager.load_project("demo").name == "新项目名"
+
+    manager.delete_project("demo")
+
+    assert not manager.store.project_root("demo").exists()
+    with pytest.raises(ArtifactStoreError, match="does not exist"):
+        manager.load_project("demo")
+
+
+def test_feature_module_can_be_renamed_and_deleted_without_affecting_siblings(tmp_path):
+    projects_root = tmp_path / "projects"
+    project_manager = ProjectManager(projects_root)
+    project_manager.create_project("commerce", "电商平台", created_by="tester-001")
+    checkout_manager = FeatureModuleManager(projects_root, "commerce", "checkout")
+    profile_manager = FeatureModuleManager(projects_root, "commerce", "profile")
+    checkout_manager.create_module("旧结算", created_by="tester-001")
+    profile_manager.create_module("个人资料", created_by="tester-001")
+
+    updated = checkout_manager.update_module(name="新结算")
+    assert updated.name == "新结算"
+    assert checkout_manager.load_module().name == "新结算"
+
+    checkout_manager.delete_module()
+
+    assert not checkout_manager.store.project_root("commerce").exists()
+    assert profile_manager.load_module().name == "个人资料"
+    assert project_manager.store.project_root("commerce").exists()

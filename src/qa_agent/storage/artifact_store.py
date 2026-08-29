@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -147,6 +148,27 @@ class ArtifactStore:
     def load_project(self, project_id: str) -> dict[str, Any]:
         return self._read_json(self.project_root(project_id) / "project.json")
 
+    def delete_project(self, project_id: str) -> None:
+        """Permanently remove one project and all of its module contexts."""
+
+        if self.module_id is not None:
+            raise ArtifactStoreError("cannot delete a project from a module store")
+        root = self.project_root(project_id)
+        if not root.is_dir():
+            raise ArtifactStoreError(f"project does not exist: {project_id}")
+        shutil.rmtree(root)
+
+    def delete_module(self, project_id: str, module_id: str | None = None) -> None:
+        """Permanently remove one feature module context."""
+
+        resolved_module_id = module_id or self.module_id
+        if resolved_module_id is None:
+            raise ArtifactStoreError("module_id is required")
+        module_store = ArtifactStore(self.projects_root, module_id=resolved_module_id)
+        root = module_store.project_root(project_id)
+        if not root.is_dir():
+            raise ArtifactStoreError(f"feature module does not exist: {resolved_module_id}")
+        shutil.rmtree(root)
     def save_decision(
         self,
         project_id: str,

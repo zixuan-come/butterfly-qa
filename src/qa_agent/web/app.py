@@ -53,6 +53,7 @@ from .models import (
     ApprovalData,
     CreateFeatureModuleRequest,
     CreateProjectRequest,
+    DeletionData,
     EvidenceData,
     FeatureModuleDetail,
     FeatureModuleListData,
@@ -67,6 +68,8 @@ from .models import (
     RunWorkflowRequest,
     SubmitApprovalRequest,
     SubmitExecutionRequest,
+    UpdateFeatureModuleRequest,
+    UpdateProjectRequest,
     ValidationErrorData,
     WorkflowStatusData,
     WorkflowStepData,
@@ -304,6 +307,57 @@ def create_app(
             raise
         return _success(request, _project_detail(project, workflow))
 
+    @app.put(
+        f"{API_PREFIX}/projects/{{project_id}}",
+        response_model=ApiResponse[ProjectDetail],
+        tags=["projects"],
+    )
+    def update_project(
+        project_id: str,
+        payload: UpdateProjectRequest,
+        request: Request,
+    ) -> ApiResponse[ProjectDetail]:
+        manager = _project_manager(request)
+        with _project_lock(request, project_id):
+            try:
+                project = manager.update_project(project_id, name=payload.name)
+                workflow = manager.load_workflow(project_id)
+            except ArtifactStoreError as exc:
+                if "does not exist" in str(exc):
+                    raise ApiError(
+                        http_status=status.HTTP_404_NOT_FOUND,
+                        code="PROJECT_NOT_FOUND",
+                        message="项目不存在",
+                    ) from exc
+                raise
+        return _success(request, _project_detail(project, workflow), message="项目修改成功")
+
+    @app.delete(
+        f"{API_PREFIX}/projects/{{project_id}}",
+        response_model=ApiResponse[DeletionData],
+        tags=["projects"],
+    )
+    def delete_project(
+        project_id: str,
+        request: Request,
+    ) -> ApiResponse[DeletionData]:
+        manager = _project_manager(request)
+        with _project_lock(request, project_id):
+            try:
+                manager.delete_project(project_id)
+            except ArtifactStoreError as exc:
+                if "does not exist" in str(exc):
+                    raise ApiError(
+                        http_status=status.HTTP_404_NOT_FOUND,
+                        code="PROJECT_NOT_FOUND",
+                        message="项目不存在",
+                    ) from exc
+                raise
+        return _success(
+            request,
+            DeletionData(resource_type="project", resource_id=project_id),
+            message="项目已删除",
+        )
     @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/modules",
         response_model=ApiResponse[FeatureModuleDetail],
@@ -406,6 +460,63 @@ def create_app(
             raise
         return _success(request, _feature_module_detail(module, workflow))
 
+    @app.put(
+        f"{API_PREFIX}/projects/{{project_id}}/modules/{{module_id}}",
+        response_model=ApiResponse[FeatureModuleDetail],
+        tags=["feature-modules"],
+    )
+    def update_feature_module(
+        project_id: str,
+        module_id: str,
+        payload: UpdateFeatureModuleRequest,
+        request: Request,
+    ) -> ApiResponse[FeatureModuleDetail]:
+        try:
+            manager = _feature_module_manager(request, project_id, module_id)
+            with _project_lock(request, project_id, module_id):
+                module = manager.update_module(name=payload.name)
+                workflow = manager.load_workflow(project_id)
+        except ArtifactStoreError as exc:
+            if "does not exist" in str(exc):
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="FEATURE_MODULE_NOT_FOUND",
+                    message="功能模块不存在",
+                ) from exc
+            raise
+        return _success(
+            request,
+            _feature_module_detail(module, workflow),
+            message="功能模块修改成功",
+        )
+
+    @app.delete(
+        f"{API_PREFIX}/projects/{{project_id}}/modules/{{module_id}}",
+        response_model=ApiResponse[DeletionData],
+        tags=["feature-modules"],
+    )
+    def delete_feature_module(
+        project_id: str,
+        module_id: str,
+        request: Request,
+    ) -> ApiResponse[DeletionData]:
+        try:
+            manager = _feature_module_manager(request, project_id, module_id)
+            with _project_lock(request, project_id, module_id):
+                manager.delete_module()
+        except ArtifactStoreError as exc:
+            if "does not exist" in str(exc):
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="FEATURE_MODULE_NOT_FOUND",
+                    message="功能模块不存在",
+                ) from exc
+            raise
+        return _success(
+            request,
+            DeletionData(resource_type="feature_module", resource_id=module_id),
+            message="功能模块已删除",
+        )
     @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/inputs",
         response_model=ApiResponse[ProjectInputData],

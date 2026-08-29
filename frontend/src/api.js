@@ -60,6 +60,18 @@ export function getProject(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}`)
 }
 
+export function updateProject(projectId, payload) {
+  return request(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteProject(projectId) {
+  return request(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  })
+}
 export function listFeatureModules(projectId) {
   return request(`/projects/${encodeURIComponent(projectId)}/modules`)
 }
@@ -71,6 +83,18 @@ export function createFeatureModule(projectId, payload) {
   })
 }
 
+export function updateFeatureModule(projectId, moduleId, payload) {
+  return request(`/projects/${encodeURIComponent(projectId)}/modules/${encodeURIComponent(moduleId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  })
+}
+
+export function deleteFeatureModule(projectId, moduleId) {
+  return request(`/projects/${encodeURIComponent(projectId)}/modules/${encodeURIComponent(moduleId)}`, {
+    method: "DELETE",
+  })
+}
 function withModule(path, moduleId) {
   if (!moduleId) return path
   const separator = path.includes('?') ? '&' : '?'

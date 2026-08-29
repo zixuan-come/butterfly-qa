@@ -23,6 +23,7 @@ import {
   Menu,
   Moon,
   Paperclip,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -31,6 +32,7 @@ import {
   Sparkles,
   Sun,
   TestTube2,
+  Trash2,
   Upload,
   UserCheck,
   X,
@@ -40,6 +42,8 @@ import { stages as stageDefinitions } from './data'
 import {
   createFeatureModule,
   createProject,
+  deleteFeatureModule,
+  deleteProject,
   getActiveArtifact,
   getProject,
   getProjectInputPreview,
@@ -50,6 +54,8 @@ import {
   runWorkflow,
   submitApproval,
   submitExecution,
+  updateFeatureModule,
+  updateProject,
   uploadEvidence,
   uploadProjectInput,
 } from './api'
@@ -159,6 +165,23 @@ const artifacts = reactive({
 const projectMenuOpen = ref(false)
 const createProjectOpen = ref(false)
 const createModuleOpen = ref(false)
+const manageDialog = reactive({
+  open: false,
+  kind: '',
+  projectId: '',
+  moduleId: '',
+  name: '',
+  busy: false,
+})
+const deleteDialog = reactive({
+  open: false,
+  kind: '',
+  projectId: '',
+  moduleId: '',
+  title: '',
+  description: '',
+  busy: false,
+})
 const projectsLoading = ref(false)
 const creatingProject = ref(false)
 const creatingModule = ref(false)
@@ -362,7 +385,9 @@ async function loadProjects(preferredProjectId = null) {
     const result = await listProjects()
     projects.value = result.items
     const remembered = localStorage.getItem('butterfly-project-id')
-    const projectId = preferredProjectId
+    const projectId = (preferredProjectId && projects.value.some(
+      (item) => item.project_id === preferredProjectId,
+    ) ? preferredProjectId : null)
       || (remembered && projects.value.some((item) => item.project_id === remembered) ? remembered : null)
       || projects.value[0]?.project_id
     if (projectId) {
@@ -834,6 +859,101 @@ function inferEvidenceType(file) {
   if (file.name.toLowerCase().endsWith('.log')) return 'log'
   return 'file'
 }
+function openEditProject(project) {
+  projectMenuOpen.value = false
+  manageDialog.open = true
+  manageDialog.kind = 'project'
+  manageDialog.projectId = project.project_id
+  manageDialog.moduleId = ''
+  manageDialog.name = project.name
+}
+
+function openEditModule(module) {
+  projectMenuOpen.value = false
+  manageDialog.open = true
+  manageDialog.kind = 'module'
+  manageDialog.projectId = currentProject.value?.project_id || ''
+  manageDialog.moduleId = module.module_id
+  manageDialog.name = module.name
+}
+
+async function submitManage() {
+  if (!manageDialog.name.trim()) return
+  manageDialog.busy = true
+  try {
+    if (manageDialog.kind === 'project') {
+      await updateProject(manageDialog.projectId, { name: manageDialog.name.trim() })
+      manageDialog.open = false
+      await loadProjects(manageDialog.projectId)
+      showToast('项目名称已更新')
+    } else {
+      await updateFeatureModule(
+        manageDialog.projectId,
+        manageDialog.moduleId,
+        { name: manageDialog.name.trim() },
+      )
+      manageDialog.open = false
+      await selectProject(manageDialog.projectId, manageDialog.moduleId)
+      showToast('功能模块名称已更新')
+    }
+  } catch (error) {
+    showToast(error.message)
+  } finally {
+    manageDialog.busy = false
+  }
+}
+
+function openDeleteProject(project) {
+  projectMenuOpen.value = false
+  deleteDialog.open = true
+  deleteDialog.kind = 'project'
+  deleteDialog.projectId = project.project_id
+  deleteDialog.moduleId = ''
+  deleteDialog.title = '删除项目“' + project.name + '”？'
+  deleteDialog.description = '项目下的全部功能模块、需求、测试用例、证据、审批和报告都会被永久删除。'
+}
+
+function openDeleteModule(module) {
+  projectMenuOpen.value = false
+  deleteDialog.open = true
+  deleteDialog.kind = 'module'
+  deleteDialog.projectId = currentProject.value?.project_id || ''
+  deleteDialog.moduleId = module.module_id
+  deleteDialog.title = '删除功能模块“' + module.name + '”？'
+  deleteDialog.description = '该模块的需求、测试用例、证据、审批和报告都会被永久删除，不影响同项目其他模块。'
+}
+
+async function submitDelete() {
+  deleteDialog.busy = true
+  try {
+    if (deleteDialog.kind === 'project') {
+      const projectId = deleteDialog.projectId
+      localStorage.removeItem('butterfly-module-id:' + projectId)
+      await deleteProject(projectId)
+      deleteDialog.open = false
+      await loadProjects()
+      showToast('项目及其全部资料已删除')
+    } else {
+      const projectId = deleteDialog.projectId
+      const moduleId = deleteDialog.moduleId
+      const deletingCurrent = currentProject.value?.project_id === projectId
+        && currentModule.value?.module_id === moduleId
+      localStorage.removeItem('butterfly-module-id:' + projectId)
+      await deleteFeatureModule(projectId, moduleId)
+      deleteDialog.open = false
+      if (deletingCurrent) {
+        await selectProject(projectId, null)
+      } else {
+        await selectProject(projectId, currentModule.value?.module_id || null)
+      }
+      showToast('功能模块及其全部资料已删除')
+    }
+  } catch (error) {
+    showToast(error.message)
+  } finally {
+    deleteDialog.busy = false
+  }
+}
 </script>
 
 <template>
@@ -887,17 +1007,21 @@ function inferEvidenceType(file) {
         </button>
         <div v-if="projectMenuOpen" class="project-menu">
           <div class="project-menu-heading">项目列表</div>
-          <button
-            v-for="project in projects"
-            :key="project.project_id"
-            type="button"
-            class="project-option"
-            :class="{ active: project.project_id === currentProject?.project_id }"
-            @click="selectProject(project.project_id)"
-          >
-            <span><strong>{{ project.name }}</strong><small>{{ project.project_id }}</small></span>
-            <Check v-if="project.project_id === currentProject?.project_id" :size="14" />
-          </button>
+          <div v-for="project in projects" :key="project.project_id" class="project-option-row">
+            <button
+              type="button"
+              class="project-option"
+              :class="{ active: project.project_id === currentProject?.project_id }"
+              @click="selectProject(project.project_id)"
+            >
+              <span><strong>{{ project.name }}</strong><small>{{ project.project_id }}</small></span>
+              <Check v-if="project.project_id === currentProject?.project_id" :size="14" />
+            </button>
+            <span class="project-option-actions">
+              <button class="menu-action-button" type="button" title="编辑项目" @click.stop="openEditProject(project)"><Pencil :size="13" /></button>
+              <button class="menu-action-button danger-action" type="button" title="删除项目" @click.stop="openDeleteProject(project)"><Trash2 :size="13" /></button>
+            </span>
+          </div>
           <div v-if="!projects.length && !projectsLoading" class="project-menu-empty">暂无项目</div>
           <div v-if="currentProject" class="module-branch">
             <div class="module-menu-heading">
@@ -916,18 +1040,22 @@ function inferEvidenceType(file) {
               <span><strong>V1 兼容流程</strong><small>项目根级上下文</small></span>
               <Check v-if="!currentModule" :size="14" />
             </button>
-            <button
-              v-for="module in modules"
-              :key="module.module_id"
-              class="module-option"
-              :class="{ active: module.module_id === currentModule?.module_id }"
-              type="button"
-              @click="selectModule(module.module_id)"
-            >
-              <span class="module-tree-mark"></span>
-              <span><strong>{{ module.name }}</strong><small>{{ module.module_id }} · {{ stateLabels[module.state] || module.state }}</small></span>
-              <Check v-if="module.module_id === currentModule?.module_id" :size="14" />
-            </button>
+            <div v-for="module in modules" :key="module.module_id" class="module-option-row">
+              <button
+                class="module-option"
+                :class="{ active: module.module_id === currentModule?.module_id }"
+                type="button"
+                @click="selectModule(module.module_id)"
+              >
+                <span class="module-tree-mark"></span>
+                <span><strong>{{ module.name }}</strong><small>{{ module.module_id }} · {{ stateLabels[module.state] || module.state }}</small></span>
+                <Check v-if="module.module_id === currentModule?.module_id" :size="14" />
+              </button>
+              <span class="project-option-actions">
+                <button class="menu-action-button" type="button" title="编辑功能模块" @click.stop="openEditModule(module)"><Pencil :size="13" /></button>
+                <button class="menu-action-button danger-action" type="button" title="删除功能模块" @click.stop="openDeleteModule(module)"><Trash2 :size="13" /></button>
+              </span>
+            </div>
             <button class="module-create-option" type="button" @click="openCreateModule">
               <Plus :size="14" />新建功能模块
             </button>
@@ -1406,6 +1534,44 @@ function inferEvidenceType(file) {
       </form>
     </div>
 
+
+    <div v-if="manageDialog.open" class="modal-scrim" @click.self="manageDialog.open = false">
+      <form class="modal-dialog" @submit.prevent="submitManage">
+        <div class="modal-header">
+          <div><div class="eyebrow">{{ manageDialog.kind === 'project' ? '项目管理' : '功能模块管理' }}</div><h2>编辑{{ manageDialog.kind === 'project' ? '项目' : '功能模块' }}</h2></div>
+          <button class="icon-button" type="button" title="关闭" @click="manageDialog.open = false"><X :size="18" /></button>
+        </div>
+        <label class="form-field">
+          <span>{{ manageDialog.kind === 'project' ? '项目名称' : '功能模块名称' }}</span>
+          <input v-model.trim="manageDialog.name" required maxlength="120" />
+        </label>
+        <div class="management-id-note">{{ manageDialog.kind === 'project' ? '项目 ID' : '模块 ID' }}：<strong>{{ manageDialog.kind === 'project' ? manageDialog.projectId : manageDialog.moduleId }}</strong><small>ID 创建后不可修改，用于保持历史资料关联。</small></div>
+        <div class="modal-actions">
+          <button class="button secondary" type="button" @click="manageDialog.open = false">取消</button>
+          <button class="button primary" type="submit" :disabled="manageDialog.busy">
+            <LoaderCircle v-if="manageDialog.busy" class="spin" :size="16" />
+            <template v-else>保存修改</template>
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div v-if="deleteDialog.open" class="modal-scrim" @click.self="deleteDialog.open = false">
+      <form class="modal-dialog danger-dialog" @submit.prevent="submitDelete">
+        <div class="modal-header">
+          <div><div class="eyebrow danger-eyebrow">不可撤销操作</div><h2>{{ deleteDialog.title }}</h2></div>
+          <button class="icon-button" type="button" title="关闭" @click="deleteDialog.open = false"><X :size="18" /></button>
+        </div>
+        <div class="delete-warning"><Trash2 :size="20" /><p>{{ deleteDialog.description }}<strong>删除后无法恢复，请确认你要继续。</strong></p></div>
+        <div class="modal-actions">
+          <button class="button secondary" type="button" @click="deleteDialog.open = false">取消</button>
+          <button class="button danger" type="submit" :disabled="deleteDialog.busy">
+            <LoaderCircle v-if="deleteDialog.busy" class="spin" :size="16" />
+            <template v-else>确认永久删除</template>
+          </button>
+        </div>
+      </form>
+    </div>
     <Transition name="toast"><div v-if="toast" class="toast-message"><CheckCircle2 :size="17" />{{ toast }}</div></Transition>
   </div>
 </template>

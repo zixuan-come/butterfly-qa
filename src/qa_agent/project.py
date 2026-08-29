@@ -183,6 +183,17 @@ class ProjectManager:
     def load_workflow(self, project_id: str) -> WorkflowRun:
         return WorkflowRun.model_validate(self.store.load_workflow(project_id))
 
+    def update_project(self, project_id: str, *, name: str) -> ProjectRecord:
+        project = self._load_record(project_id)
+        now = datetime.now(timezone.utc)
+        project.name = name
+        project.updated_at = now
+        self._save_record(project_id, project)
+        return project
+
+    def delete_project(self, project_id: str) -> None:
+        self._load_record(project_id)
+        self.store.delete_project(project_id)
     def _load_record(self, project_id: str) -> ProjectRecord:
         return ProjectRecord.model_validate(self.store.load_project(project_id))
 
@@ -272,6 +283,17 @@ class FeatureModuleManager(ProjectManager):
     def load_module(self) -> FeatureModuleRecord:
         return self._load_record(self.project_id)
 
+    def update_module(self, *, name: str) -> FeatureModuleRecord:
+        module = self.load_module()
+        now = datetime.now(timezone.utc)
+        module.name = name
+        module.updated_at = now
+        self._save_record(self.project_id, module)
+        return module
+
+    def delete_module(self) -> None:
+        self.load_module()
+        self.store.delete_module(self.project_id, self.module_id)
     def load_project(self, project_id: str) -> FeatureModuleRecord:
         self._require_project(project_id)
         return self._load_record(project_id)

@@ -739,3 +739,105 @@ def test_missing_feature_module_returns_module_not_found(tmp_path):
     assert detail.json()["code"] == "FEATURE_MODULE_NOT_FOUND"
     assert workflow.status_code == 404
     assert workflow.json()["code"] == "FEATURE_MODULE_NOT_FOUND"
+
+def test_project_update_delete_endpoints_and_fallback_after_delete(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "first")
+        _create_project(client, "second")
+
+        updated = client.put(
+            "/api/v1/projects/first",
+            json={"name": "第一项目（已修改）"},
+        )
+        deleted = client.delete("/api/v1/projects/first")
+        missing = client.get("/api/v1/projects/first")
+        listed = client.get("/api/v1/projects")
+
+    assert updated.status_code == 200
+    assert updated.json()["data"]["name"] == "第一项目（已修改）"
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {
+        "resource_type": "project",
+        "resource_id": "first",
+    }
+    assert missing.status_code == 404
+    assert listed.json()["data"]["total"] == 1
+    assert listed.json()["data"]["items"][0]["project_id"] == "second"
+    assert not (tmp_path / "projects" / "first").exists()
+
+
+def test_feature_module_update_delete_endpoints_preserve_other_context(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "commerce")
+        client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "checkout",
+                "name": "旧结算",
+                "created_by": "tester-001",
+            },
+        )
+        client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "profile",
+                "name": "个人资料",
+                "created_by": "tester-001",
+            },
+        )
+
+        updated = client.put(
+            "/api/v1/projects/commerce/modules/checkout",
+            json={"name": "新结算"},
+        )
+        deleted = client.delete(
+            "/api/v1/projects/commerce/modules/checkout",
+        )
+        missing = client.get(
+            "/api/v1/projects/commerce/modules/checkout",
+        )
+        profile = client.get(
+            "/api/v1/projects/commerce/modules/profile",
+        )
+        listed = client.get("/api/v1/projects/commerce/modules")
+
+    assert updated.status_code == 200
+    assert updated.json()["data"]["name"] == "新结算"
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {
+        "resource_type": "feature_module",
+        "resource_id": "checkout",
+    }
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "FEATURE_MODULE_NOT_FOUND"
+    assert profile.status_code == 200
+    assert profile.json()["data"]["name"] == "个人资料"
+    assert listed.json()["data"]["total"] == 1
+    assert not (
+        tmp_path / "projects" / "commerce" / "modules" / "checkout"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("put", "/api/v1/projects/missing", {"name": "不存在"}),
+        (
+            "put",
+            "/api/v1/projects/demo/modules/missing",
+            {"name": "不存在"},
+        ),
+    ],
+)
+def test_management_update_missing_resource_returns_not_found(
+    tmp_path,
+    method,
+    path,
+    payload,
+):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        response = getattr(client, method)(path, json=payload)
+
+    assert response.status_code == 404
+    assert response.json()["data"] is None

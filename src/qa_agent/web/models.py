@@ -32,6 +32,11 @@ class CreateProjectRequest(BaseModel):
     created_by: str = Field(min_length=1, max_length=120)
 
 
+class UpdateProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
 class CreateFeatureModuleRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -39,6 +44,16 @@ class CreateFeatureModuleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     created_by: str = Field(min_length=1, max_length=120)
 
+
+class UpdateFeatureModuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class DeletionData(BaseModel):
+    resource_type: Literal["project", "feature_module"]
+    resource_id: str
 
 class FeatureModuleSummary(BaseModel):
     module_id: str
