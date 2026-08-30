@@ -9,4 +9,8 @@ services:
     environment:
       PYTHONUTF8: "1"
       PYTHONUNBUFFERED: "1"
+    volumes:
+      - "./projects:/app/projects"
+      - "${CODEX_AUTH_FILE}:/root/.codex/auth.json:ro"
+      - "${CODEX_CONFIG_FILE}:/root/.codex/config.toml:ro"
     restart: unless-stopped

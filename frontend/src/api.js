@@ -156,6 +156,15 @@ export function getActiveArtifact(projectId, artifactType, moduleId = null) {
   ))
 }
 
+export function generateConfirmationChecklist(projectId, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/confirmation-checklists`,
+    moduleId,
+  ), {
+    method: 'POST',
+  })
+}
+
 export function submitApproval(projectId, payload, moduleId = null) {
   return request(withModule(
     `/projects/${encodeURIComponent(projectId)}/approvals`,

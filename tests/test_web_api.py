@@ -10,6 +10,9 @@ from qa_agent.project import ProjectManager
 from qa_agent.schemas import (
     ArtifactMeta,
     ArtifactStatus,
+    RequirementReview as ReviewModel,
+    RequirementReviewIssue as ReviewIssueModel,
+    ReviewDecision,
     TestCase as CaseModel,
     TestDesign as DesignModel,
     TestPoint as PointModel,
@@ -18,7 +21,7 @@ from qa_agent.schemas import (
 )
 from qa_agent.storage import ArtifactStore
 from qa_agent.web import create_app
-from qa_agent.workflow.models import ArtifactPointer
+from qa_agent.workflow.models import ArtifactPointer, WorkflowRun
 from qa_agent.workflow.states import WorkflowState
 
 
@@ -301,6 +304,53 @@ def _create_project(client: TestClient, project_id: str = "demo") -> None:
         },
     )
     assert response.status_code == 201
+
+
+def _seed_requirement_review(
+    tmp_path,
+    *,
+    project_id: str = "demo",
+    module_id: str | None = None,
+) -> ArtifactStore:
+    timestamp = datetime.now(timezone.utc)
+    store = ArtifactStore(tmp_path / "projects", module_id=module_id)
+    review = ReviewModel(
+        meta=ArtifactMeta(
+            artifact_id="review-001",
+            artifact_type="requirement_review",
+            project_id=project_id,
+            status=ArtifactStatus.PENDING,
+            created_by="requirement-agent",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        decision=ReviewDecision.NEEDS_HUMAN_DECISION,
+        issues=[
+            ReviewIssueModel(
+                issue_id="REQ-ISSUE-001",
+                issue_type="规则缺失",
+                severity="high",
+                location="第 12-14 行",
+                description="连续失败后的锁定规则未定义",
+                impact="测试无法判断第几次失败后应锁定账号",
+                suggestion="明确失败次数、统计周期和解锁方式",
+                needs_product_confirmation=True,
+            )
+        ],
+        open_questions=[
+            "账号连续登录失败多少次后锁定？",
+            "管理员手动解锁后失败次数是否清零？",
+        ],
+    )
+    store.save_artifact(review)
+    workflow = WorkflowRun.model_validate(store.load_workflow(project_id))
+    workflow.active_artifacts["requirement_review"] = ArtifactPointer(
+        artifact_id=review.meta.artifact_id,
+        artifact_type=review.meta.artifact_type,
+        version=review.meta.version,
+    )
+    store.save_workflow(project_id, workflow)
+    return store
 
 
 def _seed_test_design(
@@ -618,6 +668,128 @@ def test_active_artifact_returns_json_and_optional_markdown(tmp_path):
     assert response.json()["data"]["markdown_path"].endswith("v1.md")
     assert missing.status_code == 404
     assert missing.json()["code"] == "ACTIVE_ARTIFACT_NOT_FOUND"
+
+
+def test_confirmation_checklist_requires_an_active_requirement_review(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        response = client.post(
+            "/api/v1/projects/demo/confirmation-checklists"
+        )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "REQUIREMENT_REVIEW_NOT_FOUND"
+
+
+def test_confirmation_checklist_is_saved_as_versioned_json_and_markdown(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        store = _seed_requirement_review(tmp_path)
+
+        first = client.post(
+            "/api/v1/projects/demo/confirmation-checklists"
+        )
+        second = client.post(
+            "/api/v1/projects/demo/confirmation-checklists"
+        )
+        active = client.get(
+            "/api/v1/projects/demo/artifacts/product_confirmation_checklist"
+        )
+
+    assert first.status_code == 201
+    first_data = first.json()["data"]
+    assert first_data["version"] == 1
+    assert first_data["content"]["source_review_id"] == "review-001"
+    assert first_data["content"]["source_review_version"] == 1
+    assert first_data["content"]["items"][0] == {
+        "item_id": "CHK-001",
+        "source_issue_id": "REQ-ISSUE-001",
+        "severity": "high",
+        "location": "第 12-14 行",
+        "question": "账号连续登录失败多少次后锁定？",
+        "problem": "连续失败后的锁定规则未定义",
+        "impact": "测试无法判断第几次失败后应锁定账号",
+        "suggestion": "明确失败次数、统计周期和解锁方式",
+        "status": "pending",
+    }
+    assert first_data["content"]["items"][1]["source_issue_id"] is None
+    assert "管理员手动解锁后失败次数是否清零？" in first_data["markdown"]
+    assert first_data["markdown_path"].endswith("v1.md")
+
+    second_data = second.json()["data"]
+    assert second_data["artifact_id"] == first_data["artifact_id"]
+    assert second_data["version"] == 2
+    assert second_data["markdown_path"].endswith("v2.md")
+    assert active.status_code == 200
+    assert active.json()["data"]["version"] == 2
+
+    workflow = WorkflowRun.model_validate(store.load_workflow("demo"))
+    pointer = workflow.active_artifacts["product_confirmation_checklist"]
+    assert pointer.artifact_id == first_data["artifact_id"]
+    assert pointer.version == 2
+    artifact_root = (
+        store.project_root("demo")
+        / "artifacts"
+        / "product_confirmation_checklist"
+        / first_data["artifact_id"]
+    )
+    assert (artifact_root / "v1.json").is_file()
+    assert (artifact_root / "v1.md").is_file()
+    assert (artifact_root / "v2.json").is_file()
+    assert (artifact_root / "v2.md").is_file()
+
+
+def test_confirmation_checklist_is_isolated_by_feature_module(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client, "commerce")
+        module = client.post(
+            "/api/v1/projects/commerce/modules",
+            json={
+                "module_id": "checkout",
+                "name": "结算",
+                "created_by": "tester-001",
+            },
+        )
+        assert module.status_code == 201
+        _seed_requirement_review(
+            tmp_path,
+            project_id="commerce",
+            module_id="checkout",
+        )
+
+        generated = client.post(
+            "/api/v1/projects/commerce/confirmation-checklists",
+            params={"module_id": "checkout"},
+        )
+        module_active = client.get(
+            "/api/v1/projects/commerce/artifacts/"
+            "product_confirmation_checklist",
+            params={"module_id": "checkout"},
+        )
+        root_generation = client.post(
+            "/api/v1/projects/commerce/confirmation-checklists"
+        )
+        root_active = client.get(
+            "/api/v1/projects/commerce/artifacts/"
+            "product_confirmation_checklist"
+        )
+
+    assert generated.status_code == 201
+    assert module_active.status_code == 200
+    assert root_generation.status_code == 404
+    assert root_generation.json()["code"] == "REQUIREMENT_REVIEW_NOT_FOUND"
+    assert root_active.status_code == 404
+    assert (
+        tmp_path
+        / "projects"
+        / "commerce"
+        / "modules"
+        / "checkout"
+        / "artifacts"
+        / "product_confirmation_checklist"
+    ).is_dir()
+
+
 def test_feature_module_create_list_detail_and_duplicate_conflict(tmp_path):
     with _client(tmp_path) as client:
         _create_project(client, "commerce")

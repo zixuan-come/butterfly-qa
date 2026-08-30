@@ -137,6 +137,17 @@ class CodexAgentRunner(AgentRunner):
             "本次调用已通过 SDK 配置原生 JSON Schema。字段名、字段类型和枚举值必须严格一致。"
             "不要添加 Schema 未定义的字段，不要使用 Markdown 代码块，也不要在 JSON 前后添加解释。"
         )
+        if request.skill_name == "requirement-review":
+            sections.append(
+                "# 原文行号定位规则\n\n"
+                "评审文本输入时，物理文件第一行记为第 1 行，空行也计入行号。"
+                "请使用带行号的读取方式核对原文，不得凭章节标题估算行号。"
+                "每个问题的 location 必须包含相对文件路径和精确行号；"
+                "单处问题使用“input/example.md:第 12-14 行”，"
+                "冲突问题使用“input/example.md:第 12-14 行 ↔ "
+                "input/example.md:第 38-40 行”。"
+                "如果来源不是可按行读取的文本，则改用精确页码或图中区域。"
+            )
 
         artifact_lines = "\n".join(
             f"- {item.artifact_id} ({item.artifact_type}) v{item.version}: "

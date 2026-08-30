@@ -100,6 +100,29 @@ class RequirementReview(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
 
 
+class ProductConfirmationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1)
+    source_issue_id: str | None = None
+    severity: Literal["blocker", "high", "medium", "low"]
+    location: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    problem: str = Field(min_length=1)
+    impact: str = Field(min_length=1)
+    suggestion: str = Field(min_length=1)
+    status: Literal["pending", "confirmed", "rejected"] = "pending"
+
+
+class ProductConfirmationChecklist(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    meta: ArtifactMeta
+    source_review_id: str = Field(min_length=1)
+    source_review_version: int = Field(ge=1)
+    items: list[ProductConfirmationItem] = Field(default_factory=list)
+
+
 class RequirementItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

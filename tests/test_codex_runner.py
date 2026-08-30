@@ -90,6 +90,9 @@ def test_codex_runner_builds_prompt_and_normalizes_success(tmp_path):
     assert "skill instructions" in thread.inputs[0][0]
     assert "input/requirement-001.md" in thread.inputs[0][0]
     assert "机器校验约束" in thread.inputs[0][0]
+    assert "原文行号定位规则" in thread.inputs[0][0]
+    assert "冲突问题使用" in thread.inputs[0][0]
+    assert "空行也计入行号" in thread.inputs[0][0]
     output_schema = thread.inputs[0][1]["output_schema"]
     assert "RequirementReviewIssue" in output_schema["$defs"]
     assert set(output_schema["required"]) == set(output_schema["properties"])

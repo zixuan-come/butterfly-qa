@@ -12,6 +12,7 @@ import {
   Circle,
   ClipboardCheck,
   Clock3,
+  Download,
   FileCheck2,
   FileSearch,
   FileText,
@@ -20,6 +21,7 @@ import {
   History,
   ListChecks,
   LoaderCircle,
+  MapPin,
   Menu,
   Moon,
   Paperclip,
@@ -44,6 +46,7 @@ import {
   createProject,
   deleteFeatureModule,
   deleteProject,
+  generateConfirmationChecklist,
   getActiveArtifact,
   getProject,
   getProjectInputPreview,
@@ -145,6 +148,8 @@ const reviewApproved = ref(false)
 const approvalBusy = ref(false)
 const executionBusy = ref(false)
 const evidenceBusy = ref(false)
+const confirmationChecklistBusy = ref(false)
+const confirmationChecklistMarkdown = ref('')
 const evidenceFileInput = ref(null)
 const evidenceTarget = ref(null)
 const toast = ref('')
@@ -157,6 +162,7 @@ const workflow = ref(null)
 const requirementInputPreview = ref(null)
 const artifacts = reactive({
   requirement_review: null,
+  product_confirmation_checklist: null,
   requirement_analysis: null,
   test_design: null,
   testcase_review: null,
@@ -261,6 +267,20 @@ const requirementDocument = computed(() => {
     updatedAt: latest ? formatDateTime(latest.imported_at) : '等待导入',
   }
 })
+const requirementSourceLines = computed(() => {
+  if (requirementInputPreview.value?.preview_kind !== 'text') return []
+  return String(requirementInputPreview.value.content || '').split(/\r?\n/)
+})
+
+function parseLocationRanges(location) {
+  return [...String(location || '').matchAll(/第\s*(\d+)(?:\s*[-–—至~]\s*(\d+))?\s*行/g)]
+    .map((match) => {
+      const start = Number(match[1])
+      const end = Number(match[2] || match[1])
+      return { start: Math.min(start, end), end: Math.max(start, end) }
+    })
+}
+
 const findings = computed(() => (artifacts.requirement_review?.issues || []).map((issue) => ({
   id: issue.issue_id,
   severity: severityLabel(issue.severity),
@@ -268,9 +288,20 @@ const findings = computed(() => (artifacts.requirement_review?.issues || []).map
   title: issue.description,
   detail: issue.impact,
   suggestion: issue.suggestion,
-  anchorId: issue.location,
+  location: issue.location,
+  lineRanges: parseLocationRanges(issue.location),
   status: issue.needs_product_confirmation ? '待产品确认' : '待处理',
 })))
+const selectedRequirementLines = computed(() => {
+  const selected = findings.value.find((item) => item.id === selectedFindingId.value)
+  const lines = new Set()
+  ;(selected?.lineRanges || []).forEach(({ start, end }) => {
+    for (let line = start; line <= Math.min(end, start + 500); line += 1) {
+      lines.add(line)
+    }
+  })
+  return lines
+})
 const requirements = computed(() => (artifacts.requirement_analysis?.requirements || []).map((item) => {
   const points = (artifacts.test_design?.test_points || [])
     .filter((point) => point.requirement_refs.includes(item.requirement_id))
@@ -513,6 +544,9 @@ async function loadActiveArtifacts(workflowData, requestId) {
       )
       if (requestId !== contextRequestId) return
       artifacts[artifactType] = result.content
+      if (artifactType === 'product_confirmation_checklist') {
+        confirmationChecklistMarkdown.value = result.markdown || ''
+      }
     } catch (error) {
       if (requestId !== contextRequestId) return
       artifacts[artifactType] = null
@@ -549,6 +583,7 @@ async function loadRequirementPreview(workflowData, requestId) {
   }
 }
 function resetArtifacts() {
+  confirmationChecklistMarkdown.value = ''
   Object.keys(artifacts).forEach((artifactType) => {
     artifacts[artifactType] = null
   })
@@ -658,6 +693,53 @@ async function handleRequirementFile(event) {
     uploadingRequirement.value = false
     event.target.value = ''
   }
+}
+
+async function generateProductConfirmationChecklist() {
+  if (!currentProject.value || !artifacts.requirement_review) {
+    showToast('请先完成需求评审，再生成产品确认清单')
+    return
+  }
+  const projectId = currentProject.value.project_id
+  const moduleId = currentModule.value?.module_id || null
+  const requestId = contextRequestId
+  confirmationChecklistBusy.value = true
+  try {
+    const result = await generateConfirmationChecklist(projectId, moduleId)
+    if (requestId !== contextRequestId) return
+    artifacts.product_confirmation_checklist = result.content
+    confirmationChecklistMarkdown.value = result.markdown || ''
+    workflow.value.active_artifacts.product_confirmation_checklist = {
+      artifact_id: result.artifact_id,
+      artifact_type: result.artifact_type,
+      version: result.version,
+    }
+    showToast(`产品确认清单 v${result.version} 已生成并保存`)
+  } catch (error) {
+    if (requestId === contextRequestId) showToast(error.message)
+  } finally {
+    confirmationChecklistBusy.value = false
+  }
+}
+
+function downloadConfirmationChecklist() {
+  const checklist = artifacts.product_confirmation_checklist
+  if (!checklist || !confirmationChecklistMarkdown.value) {
+    showToast('当前没有可下载的产品确认清单')
+    return
+  }
+  const blob = new Blob(
+    [confirmationChecklistMarkdown.value],
+    { type: 'text/markdown;charset=utf-8' },
+  )
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `产品确认清单-v${checklist.meta.version}.md`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 async function continueWorkflow() {
@@ -808,6 +890,13 @@ function selectFinding(id) {
   const finding = findings.value.find((item) => item.id === id)
   if (findingFilter.value !== '全部' && finding?.severity !== findingFilter.value) {
     findingFilter.value = '全部'
+  }
+  const firstLine = finding?.lineRanges[0]?.start
+  if (firstLine && requirementInputPreview.value?.preview_kind === 'text') {
+    requestAnimationFrame(() => {
+      document.getElementById('requirement-line-' + firstLine)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
   }
 }
 
@@ -1181,7 +1270,22 @@ async function submitDelete() {
             <button class="button secondary small" type="button" :disabled="uploadingRequirement" @click="chooseRequirementFile"><Upload :size="15" />上传修订版</button>
           </div>
           <article class="requirement-document">
-            <pre v-if="requirementInputPreview?.preview_kind === 'text'" class="requirement-source-text">{{ requirementInputPreview.content }}</pre>
+            <div
+              v-if="requirementInputPreview?.preview_kind === 'text'"
+              class="requirement-source-text"
+              aria-label="带行号的需求原文"
+            >
+              <div
+                v-for="(line, index) in requirementSourceLines"
+                :id="'requirement-line-' + (index + 1)"
+                :key="index"
+                class="requirement-source-line"
+                :class="{ highlighted: selectedRequirementLines.has(index + 1) }"
+              >
+                <span class="requirement-line-number">{{ index + 1 }}</span>
+                <span class="requirement-line-content">{{ line || ' ' }}</span>
+              </div>
+            </div>
             <div v-else-if="requirementInputPreview?.preview_kind === 'image'" class="requirement-media-preview">
               <img :src="requirementInputPreview.resolvedContentUrl" :alt="requirementDocument.name" />
             </div>
@@ -1234,8 +1338,12 @@ async function submitDelete() {
                   <span class="finding-category">{{ finding.category }}</span>
                   <span class="finding-id">{{ finding.id }}</span>
                 </span>
-                <strong>{{ finding.title }}</strong>
-                <span class="finding-detail">{{ finding.detail }}</span>
+                <span class="finding-location">
+                  <MapPin :size="14" />
+                  <span><b>定位：</b>{{ finding.location }}</span>
+                </span>
+                <strong><span>问题：</span>{{ finding.title }}</strong>
+                <span class="finding-detail"><b>影响：</b>{{ finding.detail }}</span>
                 <span class="suggestion"><Sparkles :size="14" /><span><b>建议：</b>{{ finding.suggestion }}</span></span>
                 <span class="finding-status"><Clock3 :size="13" />{{ finding.status }}</span>
               </button>
@@ -1252,7 +1360,56 @@ async function submitDelete() {
               <div><strong>需求准入门禁</strong><span :class="artifacts.requirement_review?.decision === 'pass' ? 'verified-chip' : 'gate-blocked'">{{ artifacts.requirement_review?.decision === 'pass' ? '已通过' : '暂未通过' }}</span></div>
               <p>{{ findings.length ? `${findingCounts['高']} 个高风险问题、${findingCounts['中']} 个中风险问题待处理。` : '等待 AI 完成需求评审并给出准入结论。' }}</p>
             </div>
-            <button class="button secondary small" type="button" @click="showToast('已生成产品确认清单')">生成确认清单</button>
+            <button
+              class="button secondary small"
+              type="button"
+              :disabled="!artifacts.requirement_review || confirmationChecklistBusy"
+              @click="generateProductConfirmationChecklist"
+            >
+              <LoaderCircle v-if="confirmationChecklistBusy" class="spin" :size="14" />
+              <ListChecks v-else :size="14" />
+              {{ artifacts.product_confirmation_checklist ? '重新生成清单' : '生成确认清单' }}
+            </button>
+          </div>
+
+          <div v-if="artifacts.product_confirmation_checklist" class="confirmation-checklist panel">
+            <div class="panel-header compact">
+              <div>
+                <div class="eyebrow">产品确认清单</div>
+                <h2>
+                  {{ artifacts.product_confirmation_checklist.items.length }} 项待产品确认
+                  · v{{ artifacts.product_confirmation_checklist.meta.version }}
+                </h2>
+              </div>
+              <button class="button secondary small" type="button" @click="downloadConfirmationChecklist">
+                <Download :size="14" />下载 Markdown
+              </button>
+            </div>
+            <div class="confirmation-items">
+              <div
+                v-for="item in artifacts.product_confirmation_checklist.items"
+                :key="item.item_id"
+                class="confirmation-item"
+              >
+                <div class="confirmation-item-heading">
+                  <span class="severity-badge" :class="`severity-${severityLabel(item.severity)}`">
+                    {{ severityLabel(item.severity) }}风险
+                  </span>
+                  <strong>{{ item.item_id }} · {{ item.question }}</strong>
+                </div>
+                <p><MapPin :size="13" /><span><b>定位：</b>{{ item.location }}</span></p>
+                <p><span><b>问题：</b>{{ item.problem }}</span></p>
+                <p><span><b>影响：</b>{{ item.impact }}</span></p>
+                <p><span><b>建议：</b>{{ item.suggestion }}</span></p>
+              </div>
+              <div
+                v-if="!artifacts.product_confirmation_checklist.items.length"
+                class="artifact-empty compact-empty"
+              >
+                <CheckCircle2 :size="22" />
+                <strong>当前需求评审没有待确认事项</strong>
+              </div>
+            </div>
           </div>
         </div>
       </section>

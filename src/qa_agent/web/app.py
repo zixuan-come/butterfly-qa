@@ -20,6 +20,11 @@ from fastapi.staticfiles import StaticFiles
 from ..agent_runner import AgentRunner
 from ..audit import AgentAuditStore, ResilientAgentRunner
 from ..codex_runner import CodexAgentRunner
+from ..confirmation_checklist import (
+    ARTIFACT_TYPE as CONFIRMATION_CHECKLIST_TYPE,
+    build_confirmation_checklist,
+    render_confirmation_checklist,
+)
 from ..evidence import EvidenceError, EvidenceService
 from ..human_actions import (
     HumanActionError,
@@ -41,9 +46,11 @@ from ..schemas import (
     ArtifactStatus,
     ExecutionBatch,
     HumanApproval,
+    ProductConfirmationChecklist,
+    RequirementReview,
 )
 from ..storage import ArtifactStore, ArtifactStoreError
-from ..workflow.models import WorkflowRun
+from ..workflow.models import ArtifactPointer, WorkflowRun
 from ..workflow.state_machine import WorkflowStateMachine
 from ..workflow.states import WorkflowState
 from .models import (
@@ -891,6 +898,101 @@ def create_app(
             request,
             EvidenceData.model_validate(evidence.model_dump(mode="json")),
             message="证据上传成功",
+        )
+
+    @app.post(
+        f"{API_PREFIX}/projects/{{project_id}}/confirmation-checklists",
+        response_model=ApiResponse[ActiveArtifactData],
+        status_code=status.HTTP_201_CREATED,
+        tags=["artifacts"],
+    )
+    def generate_confirmation_checklist(
+        project_id: str,
+        request: Request,
+        module_id: str | None = None,
+    ) -> ApiResponse[ActiveArtifactData]:
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+
+        with _project_lock(request, project_id, module_id):
+            _, workflow = _load_project(manager, project_id)
+            review_pointer = workflow.active_artifacts.get("requirement_review")
+            if review_pointer is None:
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="REQUIREMENT_REVIEW_NOT_FOUND",
+                    message="请先完成需求评审，再生成产品确认清单",
+                )
+
+            review = RequirementReview.model_validate(
+                store.load_artifact(
+                    project_id,
+                    review_pointer.artifact_type,
+                    review_pointer.artifact_id,
+                    review_pointer.version,
+                )
+            )
+            current_pointer = workflow.active_artifacts.get(
+                CONFIRMATION_CHECKLIST_TYPE
+            )
+            artifact_id = None
+            version = 1
+            created_at = None
+            if current_pointer is not None:
+                current = ProductConfirmationChecklist.model_validate(
+                    store.load_artifact(
+                        project_id,
+                        current_pointer.artifact_type,
+                        current_pointer.artifact_id,
+                        current_pointer.version,
+                    )
+                )
+                artifact_id = current.meta.artifact_id
+                version = current.meta.version + 1
+                created_at = current.meta.created_at
+
+            now = datetime.now(timezone.utc)
+            checklist = build_confirmation_checklist(
+                review,
+                project_id=project_id,
+                artifact_id=artifact_id,
+                version=version,
+                created_at=created_at,
+                now=now,
+            )
+            store.save_artifact(checklist)
+            markdown = render_confirmation_checklist(checklist)
+            markdown_path = store.save_artifact_text(
+                project_id,
+                checklist.meta.artifact_type,
+                checklist.meta.artifact_id,
+                checklist.meta.version,
+                markdown,
+            )
+            workflow.active_artifacts[CONFIRMATION_CHECKLIST_TYPE] = (
+                ArtifactPointer(
+                    artifact_id=checklist.meta.artifact_id,
+                    artifact_type=checklist.meta.artifact_type,
+                    version=checklist.meta.version,
+                )
+            )
+            workflow.updated_at = now
+            store.save_workflow(project_id, workflow)
+
+        return _success(
+            request,
+            ActiveArtifactData(
+                artifact_id=checklist.meta.artifact_id,
+                artifact_type=checklist.meta.artifact_type,
+                version=checklist.meta.version,
+                content=checklist.model_dump(mode="json"),
+                markdown=markdown,
+                markdown_path=_project_relative_path(
+                    markdown_path,
+                    store.project_root(project_id),
+                ),
+            ),
+            message="产品确认清单生成成功",
         )
 
     @app.get(

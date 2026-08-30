@@ -1588,6 +1588,31 @@ p {
   line-height: 1.4;
 }
 
+.finding-location {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.finding-location svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--primary);
+}
+
+.finding-location b {
+  color: var(--text);
+  font-family: Inter, 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
+}
+
 .finding-detail,
 .suggestion {
   color: var(--text-secondary);
@@ -1662,6 +1687,55 @@ p {
   color: var(--warning);
 }
 
+.confirmation-checklist .panel-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.confirmation-items {
+  display: flex;
+  max-height: 420px;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.confirmation-item {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.confirmation-item:last-child {
+  border-bottom: 0;
+}
+
+.confirmation-item-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.confirmation-item-heading strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.confirmation-item p {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.confirmation-item p svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--primary);
+}
 .vertical-workspace {
   display: flex;
   flex-direction: column;
@@ -2687,9 +2761,33 @@ select {
 .requirement-source-text {
   margin: 0;
   color: var(--text-secondary);
-  font-family: 'Noto Sans SC', sans-serif;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', 'Noto Sans SC', monospace;
   font-size: 12px;
   line-height: 1.9;
+}
+
+.requirement-source-line {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 44px minmax(0, 1fr);
+  border-left: 2px solid transparent;
+  scroll-margin-block: 150px;
+}
+
+.requirement-source-line.highlighted {
+  border-left-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.requirement-line-number {
+  padding-right: 12px;
+  color: var(--text-muted);
+  text-align: right;
+  user-select: none;
+}
+
+.requirement-line-content {
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
