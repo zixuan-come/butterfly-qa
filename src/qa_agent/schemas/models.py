@@ -101,16 +101,18 @@ class RequirementReview(BaseModel):
 
 
 class ProductConfirmationItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """A product decision task, intentionally smaller than the AI review finding."""
+
+    model_config = ConfigDict(extra="ignore")
 
     item_id: str = Field(min_length=1)
     source_issue_id: str | None = None
     severity: Literal["blocker", "high", "medium", "low"]
     location: str = Field(min_length=1)
     question: str = Field(min_length=1)
-    problem: str = Field(min_length=1)
-    impact: str = Field(min_length=1)
-    suggestion: str = Field(min_length=1)
+    decision_options: list[str] = Field(default_factory=list)
+    product_decision: str = ""
+    owner: str = ""
     status: Literal["pending", "confirmed", "rejected"] = "pending"
 
 

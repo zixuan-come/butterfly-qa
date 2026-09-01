@@ -335,7 +335,17 @@ def _seed_requirement_review(
                 impact="测试无法判断第几次失败后应锁定账号",
                 suggestion="明确失败次数、统计周期和解锁方式",
                 needs_product_confirmation=True,
-            )
+            ),
+            ReviewIssueModel(
+                issue_id="REQ-ISSUE-002",
+                issue_type="表达不清",
+                severity="low",
+                location="第 20 行",
+                description="提示文案未说明展示时机",
+                impact="测试无法确定提示出现的时机",
+                suggestion="补充提示展示时机",
+                needs_product_confirmation=False,
+            ),
         ],
         open_questions=[
             "账号连续登录失败多少次后锁定？",
@@ -701,19 +711,25 @@ def test_confirmation_checklist_is_saved_as_versioned_json_and_markdown(tmp_path
     assert first_data["version"] == 1
     assert first_data["content"]["source_review_id"] == "review-001"
     assert first_data["content"]["source_review_version"] == 1
+    assert len(first_data["content"]["items"]) == 2
     assert first_data["content"]["items"][0] == {
         "item_id": "CHK-001",
         "source_issue_id": "REQ-ISSUE-001",
         "severity": "high",
         "location": "第 12-14 行",
         "question": "账号连续登录失败多少次后锁定？",
-        "problem": "连续失败后的锁定规则未定义",
-        "impact": "测试无法判断第几次失败后应锁定账号",
-        "suggestion": "明确失败次数、统计周期和解锁方式",
+        "decision_options": [
+            "接受建议并补充为正式产品规则",
+            "不采纳建议，并填写替代产品规则",
+        ],
+        "product_decision": "",
+        "owner": "",
         "status": "pending",
     }
     assert first_data["content"]["items"][1]["source_issue_id"] is None
     assert "管理员手动解锁后失败次数是否清零？" in first_data["markdown"]
+    assert "测试无法判断第几次失败后应锁定账号" not in first_data["markdown"]
+    assert "明确失败次数、统计周期和解锁方式" not in first_data["markdown"]
     assert first_data["markdown_path"].endswith("v1.md")
 
     second_data = second.json()["data"]

@@ -89,6 +89,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.MANUAL_INTERVENTION_REQUIRED: frozenset(
         {
             WorkflowState.REQUIREMENT_REVIEWING,
+            WorkflowState.WAITING_PRODUCT_REVISION,
             WorkflowState.REQUIREMENT_ANALYZING,
             WorkflowState.TESTCASE_DESIGNING,
             WorkflowState.TESTCASE_REVIEWING,

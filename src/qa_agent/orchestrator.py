@@ -99,7 +99,16 @@ class WorkflowOrchestrator:
             )
 
         if action.action is WorkflowActionType.WAIT_HUMAN:
-            return OrchestrationResult(main_response=main_response, action=action)
+            transition = self._transition_if_needed(
+                action.target_state,
+                trigger,
+                action.reason,
+            )
+            return OrchestrationResult(
+                main_response=main_response,
+                action=action,
+                transition=transition,
+            )
 
         if action.action in {
             WorkflowActionType.TRANSITION,
@@ -110,6 +119,11 @@ class WorkflowOrchestrator:
                 if action.action is WorkflowActionType.MANUAL_INTERVENTION
                 else action.target_state
             )
+            if target is self.workflow.current_state:
+                return OrchestrationResult(
+                    main_response=main_response,
+                    action=action,
+                )
             transition = self._transition(target, trigger, action.reason)
             return OrchestrationResult(
                 main_response=main_response,
@@ -176,6 +190,7 @@ class WorkflowOrchestrator:
             f"{name}={pointer.artifact_id}:v{pointer.version}"
             for name, pointer in self.workflow.active_artifacts.items()
         ) or "无"
+        routing_context = self._routing_context(refs)
         return AgentRequest(
             request_id=f"main-{uuid4().hex}",
             project_id=self.workflow.project_id,
@@ -186,6 +201,8 @@ class WorkflowOrchestrator:
                 f"允许的下一状态为：{', '.join(state.value for state in WorkflowStateMachine(self.workflow).available_states()) or '无'}。\n"
                 f"已导入的原始输入摘要：{input_summary}。\n"
                 f"当前活动结构化产物：{artifact_summary}。\n"
+                "以下是 Harness 已读取并校验过的路由摘要。你必须以该摘要为准，不要尝试通过文件系统重新读取产物，也不要因为无法访问工作区而猜测。\n"
+                f"路由摘要：\n{routing_context}\n"
                 "你只负责路由，不得读取或评审原始需求内容。处理中状态缺少当前阶段产物时，"
                 "应重新调用该阶段的专业 Agent，目标状态保持当前状态。\n"
                 "请根据当前产物和状态返回一个严格 JSON 的 WorkflowAction。\n"
@@ -199,6 +216,71 @@ class WorkflowOrchestrator:
             working_directory=str(self.project_root) if self.project_root else None,
         )
 
+    def _routing_context(self, refs: list[ArtifactPointer]) -> str:
+        """Provide bounded, Harness-read routing facts to the main-flow agent."""
+
+        if self.artifact_store is None or not refs:
+            return "- 无可读取的结构化产物摘要"
+
+        summaries: list[dict[str, Any]] = []
+        for pointer in refs:
+            try:
+                artifact = self.artifact_store.load_artifact(
+                    self.workflow.project_id,
+                    pointer.artifact_type,
+                    pointer.artifact_id,
+                    pointer.version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                summaries.append(
+                    {
+                        "artifact_type": pointer.artifact_type,
+                        "artifact_id": pointer.artifact_id,
+                        "version": pointer.version,
+                        "read_status": "failed",
+                        "read_error": type(exc).__name__,
+                    }
+                )
+                continue
+
+            summary: dict[str, Any] = {
+                "artifact_type": pointer.artifact_type,
+                "artifact_id": pointer.artifact_id,
+                "version": pointer.version,
+                "read_status": "ok",
+            }
+            if pointer.artifact_type == "requirement_review":
+                issues = artifact.get("issues") or []
+                summary.update(
+                    {
+                        "decision": artifact.get("decision"),
+                        "issue_count": len(issues),
+                        "product_confirmation_issue_count": sum(
+                            1
+                            for issue in issues
+                            if issue.get("needs_product_confirmation") is True
+                        ),
+                        "open_question_count": len(artifact.get("open_questions") or []),
+                    }
+                )
+            elif pointer.artifact_type == "product_confirmation_checklist":
+                items = artifact.get("items") or []
+                summary.update(
+                    {
+                        "item_count": len(items),
+                        "pending_item_count": sum(
+                            1
+                            for item in items
+                            if item.get("status", "pending") == "pending"
+                        ),
+                        "confirmed_item_count": sum(
+                            1 for item in items if item.get("status") == "confirmed"
+                        ),
+                    }
+                )
+            summaries.append(summary)
+
+        return json.dumps(summaries, ensure_ascii=False, indent=2)
     def _specialist_request(self, action: WorkflowAction) -> AgentRequest:
         refs = self._resolve_artifact_refs(action.input_artifact_refs)
         return AgentRequest(
@@ -242,10 +324,16 @@ class WorkflowOrchestrator:
                 raise OrchestrationError(
                     f"invoke target state is not reachable: {action.target_state.value}"
                 )
-        elif action.action is WorkflowActionType.TRANSITION:
-            if action.target_state not in WorkflowStateMachine(self.workflow).available_states():
+        elif action.action in {
+            WorkflowActionType.TRANSITION,
+            WorkflowActionType.WAIT_HUMAN,
+        }:
+            if action.target_state is None:
+                return
+            allowed_targets = WorkflowStateMachine(self.workflow).available_states()
+            if action.target_state is not self.workflow.current_state and action.target_state not in allowed_targets:
                 raise OrchestrationError(
-                    f"transition target state is not allowed: {action.target_state.value}"
+                    f"target state is not allowed: {action.target_state.value}"
                 )
 
     def _transition_if_needed(

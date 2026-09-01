@@ -110,6 +110,33 @@ def test_orchestrator_invokes_specialist_and_persists_artifact(tmp_path):
     assert store.load_workflow("demo-project")["current_state"] == "requirement_reviewing"
 
 
+def test_wait_human_route_transitions_to_waiting_state(tmp_path):
+    runner = QueueRunner(
+        [
+            json.dumps(
+                {
+                    "action": "wait_human",
+                    "target_state": "waiting_product_revision",
+                    "reason": "存在待产品确认项",
+                    "human_question": "请产品确认评审清单",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    workflow = make_workflow()
+    workflow.current_state = WorkflowState.REQUIREMENT_REVIEWING
+
+    result = WorkflowOrchestrator(
+        workflow,
+        runner,
+        artifact_store=ArtifactStore(tmp_path),
+    ).step()
+
+    assert result.error is None
+    assert workflow.current_state is WorkflowState.WAITING_PRODUCT_REVISION
+    assert result.transition is not None
+
 def test_orchestrator_rejects_invalid_main_action_without_mutating_state(tmp_path):
     runner = QueueRunner([json.dumps({"action": "transition", "reason": "跨阶段"})])
     workflow = make_workflow()

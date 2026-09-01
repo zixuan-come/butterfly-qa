@@ -150,6 +150,7 @@ const executionBusy = ref(false)
 const evidenceBusy = ref(false)
 const confirmationChecklistBusy = ref(false)
 const confirmationChecklistMarkdown = ref('')
+const confirmationChecklistOpen = ref(false)
 const evidenceFileInput = ref(null)
 const evidenceTarget = ref(null)
 const toast = ref('')
@@ -353,6 +354,15 @@ const testcaseHealthScore = computed(() => {
   return Math.max(0, 100 - deductions)
 })
 const reportData = computed(() => artifacts.test_report)
+const confirmationItems = computed(() => (artifacts.product_confirmation_checklist?.items || []).map((item) => ({
+  ...item,
+  decision_options: item.decision_options?.length
+    ? item.decision_options
+    : ['接受建议并补充为正式产品规则', '不采纳建议，并填写替代产品规则'],
+  product_decision: item.product_decision || '',
+  owner: item.owner || '',
+  status: item.status || 'pending',
+})))
 const auditEvents = computed(() => [...(workflow.value?.transition_history || [])]
   .reverse()
   .map((event) => ({
@@ -584,6 +594,7 @@ async function loadRequirementPreview(workflowData, requestId) {
 }
 function resetArtifacts() {
   confirmationChecklistMarkdown.value = ''
+  confirmationChecklistOpen.value = false
   Object.keys(artifacts).forEach((artifactType) => {
     artifacts[artifactType] = null
   })
@@ -1372,43 +1383,22 @@ async function submitDelete() {
             </button>
           </div>
 
-          <div v-if="artifacts.product_confirmation_checklist" class="confirmation-checklist panel">
-            <div class="panel-header compact">
-              <div>
-                <div class="eyebrow">产品确认清单</div>
-                <h2>
-                  {{ artifacts.product_confirmation_checklist.items.length }} 项待产品确认
-                  · v{{ artifacts.product_confirmation_checklist.meta.version }}
-                </h2>
-              </div>
-              <button class="button secondary small" type="button" @click="downloadConfirmationChecklist">
-                <Download :size="14" />下载 Markdown
-              </button>
+          <div v-if="artifacts.product_confirmation_checklist" class="confirmation-summary">
+            <div class="confirmation-summary-copy">
+              <div class="eyebrow">产品确认清单</div>
+              <strong>
+                {{ confirmationItems.length }} 项待产品决策
+                · v{{ artifacts.product_confirmation_checklist.meta.version }}
+              </strong>
+              <span>仅收录需要产品拍板的事项，AI 分析详情请查看右侧评审批注。</span>
             </div>
-            <div class="confirmation-items">
-              <div
-                v-for="item in artifacts.product_confirmation_checklist.items"
-                :key="item.item_id"
-                class="confirmation-item"
-              >
-                <div class="confirmation-item-heading">
-                  <span class="severity-badge" :class="`severity-${severityLabel(item.severity)}`">
-                    {{ severityLabel(item.severity) }}风险
-                  </span>
-                  <strong>{{ item.item_id }} · {{ item.question }}</strong>
-                </div>
-                <p><MapPin :size="13" /><span><b>定位：</b>{{ item.location }}</span></p>
-                <p><span><b>问题：</b>{{ item.problem }}</span></p>
-                <p><span><b>影响：</b>{{ item.impact }}</span></p>
-                <p><span><b>建议：</b>{{ item.suggestion }}</span></p>
-              </div>
-              <div
-                v-if="!artifacts.product_confirmation_checklist.items.length"
-                class="artifact-empty compact-empty"
-              >
-                <CheckCircle2 :size="22" />
-                <strong>当前需求评审没有待确认事项</strong>
-              </div>
+            <div class="confirmation-summary-actions">
+              <button class="button secondary small" type="button" @click="confirmationChecklistOpen = true">
+                <ListChecks :size="14" />查看清单
+              </button>
+              <button class="icon-button" type="button" title="下载 Markdown" @click="downloadConfirmationChecklist">
+                <Download :size="16" />
+              </button>
             </div>
           </div>
         </div>
@@ -1606,6 +1596,57 @@ async function submitDelete() {
         <div v-if="!auditEvents.length" class="artifact-empty compact-empty"><strong>暂无状态迁移记录</strong></div>
       </div>
     </aside>
+
+    <div v-if="confirmationChecklistOpen && artifacts.product_confirmation_checklist" class="modal-scrim" @click.self="confirmationChecklistOpen = false">
+      <section class="modal-dialog confirmation-dialog" aria-labelledby="confirmation-checklist-title">
+        <div class="modal-header">
+          <div>
+            <div class="eyebrow">产品确认清单 · v{{ artifacts.product_confirmation_checklist.meta.version }}</div>
+            <h2 id="confirmation-checklist-title">待产品决策事项</h2>
+          </div>
+          <button class="icon-button" type="button" title="关闭确认清单" @click="confirmationChecklistOpen = false"><X :size="18" /></button>
+        </div>
+        <div class="confirmation-modal-meta">
+          <span>{{ confirmationItems.length }} 项待确认</span>
+          <span>来源评审：{{ artifacts.product_confirmation_checklist.source_review_id }} v{{ artifacts.product_confirmation_checklist.source_review_version }}</span>
+        </div>
+        <div class="confirmation-modal-list">
+          <article
+            v-for="item in confirmationItems"
+            :key="item.item_id"
+            class="confirmation-decision-item"
+          >
+            <div class="confirmation-decision-heading">
+              <span class="severity-badge" :class="'severity-' + severityLabel(item.severity)">{{ severityLabel(item.severity) }}风险</span>
+              <strong>{{ item.item_id }}</strong>
+              <span class="case-status">{{ item.status === 'pending' ? '待确认' : item.status }}</span>
+            </div>
+            <h3>{{ item.question }}</h3>
+            <p class="confirmation-source"><MapPin :size="13" />来源定位：{{ item.location }}</p>
+            <div v-if="item.decision_options.length" class="decision-options">
+              <span>决策选项</span>
+              <ul>
+                <li v-for="option in item.decision_options" :key="option">{{ option }}</li>
+              </ul>
+            </div>
+            <div class="decision-fields">
+              <div><span>产品结论</span><strong>{{ item.product_decision || '待产品填写' }}</strong></div>
+              <div><span>负责人</span><strong>{{ item.owner || '待指定' }}</strong></div>
+            </div>
+          </article>
+          <div v-if="!confirmationItems.length" class="artifact-empty compact-empty">
+            <CheckCircle2 :size="22" />
+            <strong>当前没有需要产品决策的事项</strong>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="button secondary" type="button" @click="confirmationChecklistOpen = false">关闭</button>
+          <button class="button primary" type="button" @click="downloadConfirmationChecklist">
+            <Download :size="16" />下载 Markdown
+          </button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="approvalDialog.open" class="modal-scrim" @click.self="approvalDialog.open = false">
       <form class="modal-dialog approval-dialog" @submit.prevent="submitNonApproval">

@@ -1,4 +1,4 @@
-"""Build a product confirmation checklist from a requirement review."""
+"""Build a product decision checklist from a requirement review."""
 
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -13,6 +13,10 @@ from .schemas import (
 
 
 ARTIFACT_TYPE = "product_confirmation_checklist"
+_DEFAULT_OPTIONS = [
+    "接受建议并补充为正式产品规则",
+    "不采纳建议，并填写替代产品规则",
+]
 
 
 def build_confirmation_checklist(
@@ -24,41 +28,51 @@ def build_confirmation_checklist(
     created_at: datetime | None = None,
     now: datetime | None = None,
 ) -> ProductConfirmationChecklist:
-    """Create a deterministic checklist without invoking an AI model."""
+    """Create product decision tasks without invoking an AI model."""
 
     generated_at = now or datetime.now(timezone.utc)
     items: list[ProductConfirmationItem] = []
+    confirmable_issues = [
+        (index, issue)
+        for index, issue in enumerate(review.issues)
+        if issue.needs_product_confirmation
+    ]
+    consumed_question_indexes: set[int] = set()
 
-    for index, issue in enumerate(review.issues):
+    for item_index, (issue_index, issue) in enumerate(confirmable_issues):
         question = (
-            review.open_questions[index]
-            if index < len(review.open_questions)
+            review.open_questions[issue_index]
+            if issue_index < len(review.open_questions)
             else f"请确认该问题的正式产品规则：{issue.description}"
         )
+        if issue_index < len(review.open_questions):
+            consumed_question_indexes.add(issue_index)
         items.append(
             ProductConfirmationItem(
-                item_id=f"CHK-{index + 1:03d}",
+                item_id=f"CHK-{item_index + 1:03d}",
                 source_issue_id=issue.issue_id,
                 severity=issue.severity,
                 location=issue.location,
                 question=question,
-                problem=issue.description,
-                impact=issue.impact,
-                suggestion=issue.suggestion,
+                decision_options=list(_DEFAULT_OPTIONS),
             )
         )
 
-    for question in review.open_questions[len(review.issues) :]:
+    remaining_questions = [
+        question
+        for index, question in enumerate(review.open_questions)
+        if index not in consumed_question_indexes
+    ]
+    for question in remaining_questions:
         item_number = len(items) + 1
         items.append(
             ProductConfirmationItem(
                 item_id=f"CHK-{item_number:03d}",
+                source_issue_id=None,
                 severity="medium",
                 location="需求文档（待产品补充定位）",
                 question=question,
-                problem="需求评审中存在尚未明确的产品规则",
-                impact="规则未确认可能导致实现与测试预期不一致",
-                suggestion="请产品负责人补充明确、可验收的规则和示例",
+                decision_options=list(_DEFAULT_OPTIONS),
             )
         )
 
@@ -83,7 +97,7 @@ def build_confirmation_checklist(
 def render_confirmation_checklist(
     checklist: ProductConfirmationChecklist,
 ) -> str:
-    """Render the checklist as a human-readable Markdown document."""
+    """Render only the product-facing decision fields as Markdown."""
 
     lines = [
         "# 产品确认清单",
@@ -93,12 +107,12 @@ def render_confirmation_checklist(
             "- 来源需求评审："
             f"{checklist.source_review_id} v{checklist.source_review_version}"
         ),
-        f"- 待确认项：{len(checklist.items)} 项",
+        f"- 待产品决策：{len(checklist.items)} 项",
         f"- 生成时间：{checklist.meta.updated_at.isoformat()}",
         "",
     ]
     if not checklist.items:
-        lines.extend(["当前需求评审没有待确认事项。", ""])
+        lines.extend(["当前需求评审没有需要产品决策的事项。", ""])
         return "\n".join(lines)
 
     for item in checklist.items:
@@ -106,13 +120,17 @@ def render_confirmation_checklist(
             [
                 f"## {item.item_id} · {_severity_label(item.severity)}",
                 "",
-                "- [ ] 待产品确认",
-                f"- 来源问题：{item.source_issue_id or '独立开放问题'}",
-                f"- 定位：{item.location}",
-                f"- 待确认问题：{item.question}",
-                f"- 问题：{item.problem}",
-                f"- 影响：{item.impact}",
-                f"- 建议：{item.suggestion}",
+                f"- 状态：{_status_label(item.status)}",
+                f"- 来源定位：{item.location}",
+                f"- 产品问题：{item.question}",
+                "- 决策选项：",
+            ]
+        )
+        lines.extend(f"  - {option}" for option in item.decision_options)
+        lines.extend(
+            [
+                f"- 产品结论：{item.product_decision or '待产品填写'}",
+                f"- 负责人：{item.owner or '待指定'}",
                 "",
             ]
         )
@@ -126,3 +144,11 @@ def _severity_label(severity: str) -> str:
         "medium": "中风险",
         "low": "低风险",
     }[severity]
+
+
+def _status_label(status: str) -> str:
+    return {
+        "pending": "待确认",
+        "confirmed": "已确认",
+        "rejected": "需补充规则",
+    }[status]
