@@ -30,7 +30,7 @@ from .schemas import (
 )
 from .storage.artifact_store import ArtifactStore
 from .validation.artifact_validator import validate_artifact
-from .workflow.models import ArtifactPointer, WorkflowRun, WorkflowTransition
+from .workflow.models import ArtifactPointer, InputFilePointer, WorkflowRun, WorkflowTransition
 from .workflow.state_machine import WorkflowStateMachine
 from .workflow.states import WorkflowState
 
@@ -91,6 +91,7 @@ class WorkflowOrchestrator:
 
         try:
             action = self.parse_action(main_response.output_text)
+            action = self._normalize_processing_action(action)
             self._validate_action_target(action)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return OrchestrationResult(
@@ -203,6 +204,8 @@ class WorkflowOrchestrator:
                 f"当前活动结构化产物：{artifact_summary}。\n"
                 "以下是 Harness 已读取并校验过的路由摘要。你必须以该摘要为准，不要尝试通过文件系统重新读取产物，也不要因为无法访问工作区而猜测。\n"
                 f"路由摘要：\n{routing_context}\n"
+                "如果当前状态是 requirement_analyzing，必须继续当前阶段的需求分析；"
+                "不得因为上一阶段评审报告仍有风险而重新退回需求评审。\n"
                 "你只负责路由，不得读取或评审原始需求内容。处理中状态缺少当前阶段产物时，"
                 "应重新调用该阶段的专业 Agent，目标状态保持当前状态。\n"
                 "请根据当前产物和状态返回一个严格 JSON 的 WorkflowAction。\n"
@@ -280,17 +283,154 @@ class WorkflowOrchestrator:
                 )
             summaries.append(summary)
 
+        if self._has_accepted_current_review_risk():
+            summaries.append(
+                {
+                    "fact_type": "human_risk_acceptance",
+                    "decision": "approved",
+                    "requirement_review": (
+                        self.workflow.active_artifacts["requirement_review"].model_dump(
+                            mode="json"
+                        )
+                    ),
+                    "routing_effect": (
+                        "review risks remain traceable but do not block the current "
+                        "requirement analysis stage"
+                    ),
+                }
+            )
+
         return json.dumps(summaries, ensure_ascii=False, indent=2)
+    def _current_input_files(self) -> list[InputFilePointer]:
+        """Return the current requirement plus non-requirement source material."""
+        requirement_inputs = [
+            item
+            for item in self.workflow.input_files
+            if item.category == "requirement"
+        ]
+        current = None
+        if self.workflow.current_requirement_input_id:
+            current = next(
+                (
+                    item
+                    for item in requirement_inputs
+                    if item.input_id == self.workflow.current_requirement_input_id
+                ),
+                None,
+            )
+        if current is None and requirement_inputs:
+            # Older workflow files have no pointer; the last imported requirement wins.
+            current = requirement_inputs[-1]
+
+        non_requirement_inputs = [
+            item for item in self.workflow.input_files if item.category != "requirement"
+        ]
+        return ([current] if current else []) + non_requirement_inputs
+
+    def _normalize_processing_action(self, action: WorkflowAction) -> WorkflowAction:
+        """Prevent a previously accepted review risk from re-blocking analysis."""
+        if not self._has_accepted_current_review_risk():
+            return action
+
+        if self.workflow.current_state in {
+            WorkflowState.WAITING_PRODUCT_REVISION,
+            WorkflowState.MANUAL_INTERVENTION_REQUIRED,
+        }:
+            return WorkflowAction(
+                action=WorkflowActionType.TRANSITION,
+                target_state=WorkflowState.REQUIREMENT_ANALYZING,
+                reason=(
+                    "当前需求评审风险已完成人工强制通过；恢复工作流到需求分析阶段，"
+                    "不得再次退回需求评审。"
+                ),
+            )
+
+        if self.workflow.current_state is not WorkflowState.REQUIREMENT_ANALYZING:
+            return action
+
+        if (
+            action.action is WorkflowActionType.INVOKE_AGENT
+            and action.skill_name == "requirement-analysis"
+            and action.expected_output_type == "requirement_analysis"
+            and action.target_state is WorkflowState.TESTCASE_DESIGNING
+        ):
+            return action
+
+        return WorkflowAction(
+            action=WorkflowActionType.INVOKE_AGENT,
+            target_role=AgentRole.TEST_ANALYSIS_DESIGN,
+            skill_name="requirement-analysis",
+            target_state=WorkflowState.TESTCASE_DESIGNING,
+            reason=(
+                "当前已处于 requirement_analyzing，且上一阶段风险已完成人工接受；"
+                "不得重新评估历史评审风险或退回需求评审，直接执行需求分析。"
+            ),
+            expected_output_type="requirement_analysis",
+        )
+
+    def _has_accepted_current_review_risk(self) -> bool:
+        """Return whether the active review was explicitly accepted by a human."""
+        review = self.workflow.active_artifacts.get("requirement_review")
+        if review is None:
+            return False
+
+        accepted = self.workflow.accepted_requirement_review
+        if (
+            accepted is not None
+            and accepted.artifact_type == review.artifact_type
+            and accepted.artifact_id == review.artifact_id
+            and accepted.version == review.version
+        ):
+            return True
+
+        for transition in reversed(self.workflow.transition_history):
+            if transition.to_state is not WorkflowState.REQUIREMENT_ANALYZING:
+                continue
+            related = {
+                (pointer.artifact_type, pointer.artifact_id, pointer.version)
+                for pointer in transition.related_artifacts
+            }
+            if (
+                ("requirement_review", review.artifact_id, review.version) in related
+                and any(artifact_type == "human_approval" for artifact_type, _, _ in related)
+            ):
+                return True
+        return False
     def _specialist_request(self, action: WorkflowAction) -> AgentRequest:
         refs = self._resolve_artifact_refs(action.input_artifact_refs)
+        prompt = action.reason
+        if action.skill_name == "requirement-analysis":
+            review = self.workflow.active_artifacts.get("requirement_review")
+            if review is None:
+                raise OrchestrationError(
+                    "requirement_review is required for requirement analysis"
+                )
+            if not any(
+                ref.artifact_type == review.artifact_type
+                and ref.artifact_id == review.artifact_id
+                and ref.version == review.version
+                for ref in refs
+            ):
+                refs.append(review)
+            prompt = (
+                action.reason
+                + chr(10)
+                + chr(10)
+                + "Requirement analysis must use both the current effective requirement document "
+                + "and the latest requirement_review artifact. The current requirement file is "
+                + "the only source of current business facts; historical requirement versions are "
+                + "for traceability only and must not be mixed into the analysis. "
+                + "When human risk acceptance was used, unresolved review risks must be recorded "
+                + "explicitly in open_questions or assumptions."
+            )
         return AgentRequest(
             request_id=f"specialist-{uuid4().hex}",
             project_id=self.workflow.project_id,
             role=action.target_role,
             task_name=action.skill_name or action.expected_output_type or "specialist-task",
             skill_name=action.skill_name,
-            prompt=action.reason,
-            input_files=self.workflow.input_files,
+            prompt=prompt,
+            input_files=self._current_input_files(),
             input_artifacts=refs,
             created_at=datetime.now(timezone.utc),
             model=self.model,

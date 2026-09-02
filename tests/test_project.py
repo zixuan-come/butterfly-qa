@@ -199,3 +199,34 @@ def test_feature_module_can_be_renamed_and_deleted_without_affecting_siblings(tm
     assert not checkout_manager.store.project_root("commerce").exists()
     assert profile_manager.load_module().name == "个人资料"
     assert project_manager.store.project_root("commerce").exists()
+
+
+def test_importing_requirement_revision_updates_current_pointer(tmp_path):
+    first = tmp_path / "requirement-v1.md"
+    second = tmp_path / "requirement-v2.md"
+    first.write_text("version one", encoding="utf-8")
+    second.write_text("version two", encoding="utf-8")
+    manager = ProjectManager(tmp_path / "projects")
+    manager.create_project("demo", "demo", created_by="tester")
+
+    manager.import_input(
+        "demo",
+        first,
+        InputCategory.REQUIREMENT,
+        imported_by="tester",
+        input_id="requirement-v1",
+    )
+    manager.import_input(
+        "demo",
+        second,
+        InputCategory.REQUIREMENT,
+        imported_by="tester",
+        input_id="requirement-v2",
+    )
+
+    workflow = manager.load_workflow("demo")
+    assert [item.input_id for item in workflow.input_files] == [
+        "requirement-v1",
+        "requirement-v2",
+    ]
+    assert workflow.current_requirement_input_id == "requirement-v2"

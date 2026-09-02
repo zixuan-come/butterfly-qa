@@ -1,16 +1,24 @@
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from qa_agent.agent_protocol import (
     AgentRequest,
     AgentResponse,
     AgentRole,
     AgentStatus,
+    WorkflowAction,
 )
 from qa_agent.agent_runner import AgentRunner
-from qa_agent.orchestrator import WorkflowOrchestrator
+from qa_agent.orchestrator import OrchestrationError, WorkflowOrchestrator
 from qa_agent.storage.artifact_store import ArtifactStore
-from qa_agent.workflow.models import InputFilePointer, WorkflowRun
+from qa_agent.workflow.models import (
+    ArtifactPointer,
+    InputFilePointer,
+    WorkflowRun,
+    WorkflowTransition,
+)
 from qa_agent.workflow.states import WorkflowState
 
 
@@ -204,3 +212,247 @@ def test_orchestrator_rejects_unknown_input_artifact_without_transition(tmp_path
     assert "unknown input artifact reference" in result.error
     assert workflow.current_state is WorkflowState.REQUIREMENT_RECEIVED
     assert len(runner.requests) == 1
+
+
+def test_requirement_analysis_uses_current_requirement_and_latest_review(tmp_path):
+    workflow = make_workflow()
+    workflow.input_files = [
+        InputFilePointer(
+            input_id="requirement-v1",
+            category="requirement",
+            relative_path="input/requirement-v1.md",
+            sha256="a" * 64,
+        ),
+        InputFilePointer(
+            input_id="requirement-v2",
+            category="requirement",
+            relative_path="input/requirement-v2.md",
+            sha256="b" * 64,
+        ),
+        InputFilePointer(
+            input_id="checkout-design",
+            category="design",
+            relative_path="input/checkout-design.png",
+            sha256="c" * 64,
+        ),
+    ]
+    workflow.current_requirement_input_id = "requirement-v2"
+    review = ArtifactPointer(
+        artifact_id="review-v2",
+        artifact_type="requirement_review",
+        version=2,
+    )
+    checklist = ArtifactPointer(
+        artifact_id="checklist-v1",
+        artifact_type="product_confirmation_checklist",
+        version=1,
+    )
+    workflow.active_artifacts = {
+        "requirement_review": review,
+        "product_confirmation_checklist": checklist,
+    }
+    action = WorkflowAction(
+        action="invoke_agent",
+        target_role=AgentRole.TEST_ANALYSIS_DESIGN,
+        skill_name="requirement-analysis",
+        target_state=WorkflowState.REQUIREMENT_ANALYZING,
+        reason="analyze the requirement",
+        input_artifact_refs=["product_confirmation_checklist"],
+        expected_output_type="requirement_analysis",
+    )
+
+    request = WorkflowOrchestrator(
+        workflow,
+        QueueRunner([]),
+        artifact_store=ArtifactStore(tmp_path),
+    )._specialist_request(action)
+
+    assert [item.input_id for item in request.input_files] == [
+        "requirement-v2",
+        "checkout-design",
+    ]
+    assert "requirement-v1" not in [item.input_id for item in request.input_files]
+    assert request.input_artifacts == [checklist, review]
+    assert "current effective requirement document" in request.prompt
+    assert "latest requirement_review artifact" in request.prompt
+
+
+def test_old_workflow_falls_back_to_last_requirement_input(tmp_path):
+    workflow = make_workflow()
+    workflow.input_files = [
+        InputFilePointer(
+            input_id="requirement-v1",
+            category="requirement",
+            relative_path="input/requirement-v1.md",
+            sha256="a" * 64,
+        ),
+        InputFilePointer(
+            input_id="requirement-v2",
+            category="requirement",
+            relative_path="input/requirement-v2.md",
+            sha256="b" * 64,
+        ),
+    ]
+
+    request = WorkflowOrchestrator(
+        workflow,
+        QueueRunner([]),
+        artifact_store=ArtifactStore(tmp_path),
+    )._specialist_request(
+        WorkflowAction(
+            action="invoke_agent",
+            target_role=AgentRole.TEST_ANALYSIS_DESIGN,
+            skill_name="requirement-review",
+            target_state=WorkflowState.REQUIREMENT_REVIEWING,
+            reason="review the requirement",
+            expected_output_type="requirement_review",
+        )
+    )
+
+    assert [item.input_id for item in request.input_files] == ["requirement-v2"]
+
+
+def test_requirement_analysis_requires_active_review(tmp_path):
+    workflow = make_workflow()
+    workflow.input_files = [
+        InputFilePointer(
+            input_id="requirement-v1",
+            category="requirement",
+            relative_path="input/requirement-v1.md",
+            sha256="a" * 64,
+        )
+    ]
+    action = WorkflowAction(
+        action="invoke_agent",
+        target_role=AgentRole.TEST_ANALYSIS_DESIGN,
+        skill_name="requirement-analysis",
+        target_state=WorkflowState.REQUIREMENT_ANALYZING,
+        reason="analyze the requirement",
+        expected_output_type="requirement_analysis",
+    )
+
+    with pytest.raises(OrchestrationError, match="requirement_review is required"):
+        WorkflowOrchestrator(
+            workflow,
+            QueueRunner([]),
+            artifact_store=ArtifactStore(tmp_path),
+        )._specialist_request(action)
+
+
+def test_human_risk_acceptance_prevents_analysis_from_falling_back(tmp_path):
+    workflow = make_workflow()
+    workflow.current_state = WorkflowState.REQUIREMENT_ANALYZING
+    review = ArtifactPointer(
+        artifact_id="review-001",
+        artifact_type="requirement_review",
+        version=1,
+    )
+    approval = ArtifactPointer(
+        artifact_id="approval-001",
+        artifact_type="human_approval",
+        version=1,
+    )
+    workflow.active_artifacts["requirement_review"] = review
+    workflow.transition_history.append(
+        WorkflowTransition(
+            from_state=WorkflowState.WAITING_PRODUCT_REVISION,
+            to_state=WorkflowState.REQUIREMENT_ANALYZING,
+            triggered_by="admin",
+            reason="risk accepted for controlled test",
+            occurred_at=datetime.now(timezone.utc),
+            related_artifacts=[review, approval],
+        )
+    )
+    runner = QueueRunner(
+        [
+            json.dumps(
+                {
+                    "action": "transition",
+                    "target_state": "waiting_product_revision",
+                    "reason": "historical review risks remain",
+                }
+            ),
+            json.dumps(
+                {
+                    "meta": {
+                        "artifact_id": "analysis-001",
+                        "artifact_type": "requirement_analysis",
+                        "project_id": "demo-project",
+                        "version": 1,
+                        "status": "completed",
+                        "source_artifacts": ["review-001"],
+                        "created_by": "test-analysis-design-agent",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    "requirements": [
+                        {
+                            "requirement_id": "REQ-001",
+                            "title": "Requirement",
+                            "description": "Requirement description",
+                            "actors": [],
+                            "business_rules": [],
+                            "preconditions": [],
+                            "postconditions": [],
+                            "open_questions": ["Risk accepted for test"],
+                        }
+                    ],
+                    "flows": [],
+                    "states": [],
+                    "permissions": [],
+                    "assumptions": ["Human accepted previous review risks"],
+                }
+            ),
+        ]
+    )
+
+    result = WorkflowOrchestrator(
+        workflow,
+        runner,
+        artifact_store=ArtifactStore(tmp_path),
+    ).step()
+
+    assert result.error is None
+    assert workflow.current_state is WorkflowState.TESTCASE_DESIGNING
+    assert result.action is not None
+    assert result.action.skill_name == "requirement-analysis"
+    assert result.action.target_state is WorkflowState.TESTCASE_DESIGNING
+    assert len(runner.requests) == 2
+    assert runner.requests[1].skill_name == "requirement-analysis"
+@pytest.mark.parametrize(
+    "state",
+    [WorkflowState.WAITING_PRODUCT_REVISION, WorkflowState.MANUAL_INTERVENTION_REQUIRED],
+)
+def test_accepted_requirement_risk_recovers_from_blocked_states(tmp_path, state):
+    workflow = make_workflow()
+    workflow.current_state = state
+    review = ArtifactPointer(
+        artifact_id="review-001",
+        artifact_type="requirement_review",
+        version=1,
+    )
+    workflow.active_artifacts["requirement_review"] = review
+    workflow.accepted_requirement_review = review
+    runner = QueueRunner(
+        [
+            json.dumps(
+                {
+                    "action": "transition",
+                    "target_state": "requirement_reviewing",
+                    "reason": "模型误判为需要重新评审",
+                }
+            )
+        ]
+    )
+
+    result = WorkflowOrchestrator(
+        workflow,
+        runner,
+        artifact_store=ArtifactStore(tmp_path),
+    ).step()
+
+    assert result.error is None
+    assert result.action is not None
+    assert result.action.action.value == "transition"
+    assert result.action.target_state is WorkflowState.REQUIREMENT_ANALYZING
+    assert workflow.current_state is WorkflowState.REQUIREMENT_ANALYZING

@@ -59,6 +59,11 @@ class WorkflowRun(BaseModel):
     project_id: str = Field(min_length=1)
     current_state: WorkflowState = WorkflowState.REQUIREMENT_RECEIVED
     input_files: list[InputFilePointer] = Field(default_factory=list)
+    # Points to the requirement version that is authoritative for the next step.
+    # Optional for backwards compatibility with older workflow.json files.
+    current_requirement_input_id: str | None = None
+    # The active review version whose risks were explicitly accepted by a human.
+    accepted_requirement_review: ArtifactPointer | None = None
     active_artifacts: dict[str, ArtifactPointer] = Field(default_factory=dict)
     transition_history: list[WorkflowTransition] = Field(default_factory=list)
 

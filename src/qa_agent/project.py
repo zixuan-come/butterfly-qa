@@ -172,6 +172,10 @@ class ProjectManager:
         project.inputs.append(imported)
         project.updated_at = now
         workflow.input_files.append(imported.pointer())
+        if category == InputCategory.REQUIREMENT:
+            workflow.current_requirement_input_id = imported.input_id
+            # A new requirement version invalidates any prior risk acceptance.
+            workflow.accepted_requirement_review = None
         workflow.updated_at = now
         self._save_record(project_id, project)
         self.store.save_workflow(project_id, workflow)

@@ -25,6 +25,7 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
     WorkflowState.WAITING_PRODUCT_REVISION: frozenset(
         {
             WorkflowState.REQUIREMENT_REVIEWING,
+            WorkflowState.REQUIREMENT_ANALYZING,
             WorkflowState.MANUAL_INTERVENTION_REQUIRED,
             WorkflowState.CANCELLED,
         }

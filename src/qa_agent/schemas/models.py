@@ -72,8 +72,13 @@ class HumanApproval(BaseModel):
 
     @model_validator(mode="after")
     def require_comment_for_non_approval(self) -> "HumanApproval":
-        if self.decision is not ApprovalDecision.APPROVED and not self.comment.strip():
-            raise ValueError("comment is required when approval is not approved")
+        if (
+            self.decision is not ApprovalDecision.APPROVED
+            or self.approval_type is ApprovalType.RISK_ACCEPTANCE
+        ) and not self.comment.strip():
+            raise ValueError(
+                "comment is required for non-approval decisions and risk acceptance"
+            )
         return self
 
 

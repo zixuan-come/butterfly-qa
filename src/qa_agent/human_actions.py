@@ -28,6 +28,9 @@ class HumanApprovalService:
     """Validate and persist a human decision before changing workflow state."""
 
     _ROUTES = {
+        (WorkflowState.WAITING_PRODUCT_REVISION, ApprovalType.RISK_ACCEPTANCE): {
+            ApprovalDecision.APPROVED: WorkflowState.REQUIREMENT_ANALYZING,
+        },
         (WorkflowState.WAITING_TESTCASE_APPROVAL, ApprovalType.TESTCASE_APPROVAL): {
             ApprovalDecision.APPROVED: WorkflowState.WAITING_MANUAL_EXECUTION,
             ApprovalDecision.REJECTED: WorkflowState.WAITING_CASE_REVISION,
@@ -40,6 +43,7 @@ class HumanApprovalService:
         },
     }
     _TARGET_TYPES = {
+        ApprovalType.RISK_ACCEPTANCE: "requirement_review",
         ApprovalType.TESTCASE_APPROVAL: "test_design",
         ApprovalType.REPORT_APPROVAL: "test_report",
     }
@@ -73,6 +77,15 @@ class HumanApprovalService:
             approval.meta.artifact_id,
             approval,
         )
+        if (
+            approval.approval_type is ApprovalType.RISK_ACCEPTANCE
+            and approval.decision is ApprovalDecision.APPROVED
+        ):
+            self.workflow.accepted_requirement_review = ArtifactPointer(
+                artifact_id=approval.target_artifact_id,
+                artifact_type=approval.target_artifact_type,
+                version=approval.target_artifact_version,
+            )
         transition = WorkflowStateMachine(self.workflow).transition(
             target_state,
             triggered_by=approval.decided_by,
@@ -82,7 +95,12 @@ class HumanApprovalService:
                     artifact_id=approval.target_artifact_id,
                     artifact_type=approval.target_artifact_type,
                     version=approval.target_artifact_version,
-                )
+                ),
+                ArtifactPointer(
+                    artifact_id=approval.meta.artifact_id,
+                    artifact_type=approval.meta.artifact_type,
+                    version=approval.meta.version,
+                ),
             ],
             occurred_at=approval.decided_at,
         )

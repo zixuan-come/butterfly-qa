@@ -16,6 +16,8 @@ from qa_agent.schemas import (
     ExecutionBatch,
     ExecutionRecord,
     HumanApproval,
+    RequirementReview as RequirementReviewModel,
+    ReviewDecision,
     TestCase as CaseModel,
     TestDesign as DesignModel,
     TestPoint as PointModel,
@@ -166,6 +168,73 @@ def test_testcase_approval_advances_to_manual_execution(tmp_path):
     assert transition.to_state is WorkflowState.WAITING_MANUAL_EXECUTION
     assert workflow.current_state is WorkflowState.WAITING_MANUAL_EXECUTION
     assert store.load_decision("demo-project", "approval-approved")["decision"] == "approved"
+
+
+def test_risk_acceptance_advances_requirement_review_to_analysis(tmp_path):
+    timestamp = now()
+    workflow = WorkflowRun(
+        workflow_id="wf-001",
+        project_id="demo-project",
+        current_state=WorkflowState.WAITING_PRODUCT_REVISION,
+        active_artifacts={
+            "requirement_review": ArtifactPointer(
+                artifact_id="review-001",
+                artifact_type="requirement_review",
+                version=1,
+            )
+        },
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    store = ArtifactStore(tmp_path)
+    review = RequirementReviewModel(
+        meta=ArtifactMeta(
+            artifact_id="review-001",
+            artifact_type="requirement_review",
+            project_id="demo-project",
+            status=ArtifactStatus.PENDING,
+            created_by="requirement-agent",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        decision=ReviewDecision.NEEDS_HUMAN_DECISION,
+    )
+    store.save_artifact(review)
+    approval = HumanApproval(
+        meta=ArtifactMeta(
+            artifact_id="approval-risk-001",
+            artifact_type="human_approval",
+            project_id="demo-project",
+            status=ArtifactStatus.COMPLETED,
+            created_by="product-owner",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        approval_type=ApprovalType.RISK_ACCEPTANCE,
+        target_artifact_id="review-001",
+        target_artifact_type="requirement_review",
+        target_artifact_version=1,
+        decision=ApprovalDecision.APPROVED,
+        decided_by="product-owner",
+        decided_at=timestamp,
+        comment="接受已知风险，后续由产品负责人补充规则。",
+    )
+
+    transition = HumanApprovalService(workflow, store).submit(approval)
+
+    assert transition.to_state is WorkflowState.REQUIREMENT_ANALYZING
+    assert workflow.current_state is WorkflowState.REQUIREMENT_ANALYZING
+    assert workflow.accepted_requirement_review == ArtifactPointer(
+        artifact_id="review-001",
+        artifact_type="requirement_review",
+        version=1,
+    )
+    assert store.load_workflow("demo-project")["accepted_requirement_review"] == {
+        "artifact_id": "review-001",
+        "artifact_type": "requirement_review",
+        "version": 1,
+    }
+    assert store.load_decision("demo-project", "approval-risk-001")["approval_type"] == "risk_acceptance"
 
 
 def test_testcase_changes_requested_returns_for_revision(tmp_path):
