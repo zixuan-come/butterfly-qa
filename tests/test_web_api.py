@@ -294,6 +294,49 @@ def test_run_endpoint_executes_one_bounded_orchestration_step(tmp_path):
     assert len(runner.requests) == 1
 
 
+def test_async_run_returns_task_and_persists_latest_status(tmp_path):
+    runner = QueueRunner(
+        [
+            json.dumps(
+                {
+                    "action": "wait_human",
+                    "reason": "请补充产品需求",
+                    "human_question": "请上传需求文档",
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    app = create_app(
+        tmp_path,
+        runner_factory=lambda _workspace, _store: runner,
+    )
+    with TestClient(app) as client:
+        _create_project(client)
+        started = client.post(
+            "/api/v1/projects/demo/runs",
+            params={"async_run": "true"},
+            json={},
+        )
+        run_id = started.json()["data"]["run_id"]
+        task = None
+        for _ in range(30):
+            task = client.get(f"/api/v1/projects/demo/runs/{run_id}").json()["data"]
+            if task["status"] not in {"queued", "running"}:
+                break
+            import time
+            time.sleep(0.02)
+        latest = client.get("/api/v1/projects/demo/runs/latest")
+
+    assert started.status_code == 200
+    assert started.json()["data"]["status"] in {"queued", "running", "needs_human"}
+    assert task["status"] == "needs_human"
+    assert task["result"]["action"]["action"] == "wait_human"
+    assert len(task["timeline"]) >= 3
+    assert latest.status_code == 200
+    assert latest.json()["data"]["run_id"] == run_id
+    assert latest.json()["data"]["status"] == "needs_human"
+
 def _create_project(client: TestClient, project_id: str = "demo") -> None:
     response = client.post(
         "/api/v1/projects",
@@ -311,6 +354,7 @@ def _seed_requirement_review(
     *,
     project_id: str = "demo",
     module_id: str | None = None,
+    state: WorkflowState = WorkflowState.REQUIREMENT_RECEIVED,
 ) -> ArtifactStore:
     timestamp = datetime.now(timezone.utc)
     store = ArtifactStore(tmp_path / "projects", module_id=module_id)
@@ -354,6 +398,7 @@ def _seed_requirement_review(
     )
     store.save_artifact(review)
     workflow = WorkflowRun.model_validate(store.load_workflow(project_id))
+    workflow.current_state = state
     workflow.active_artifacts["requirement_review"] = ArtifactPointer(
         artifact_id=review.meta.artifact_id,
         artifact_type=review.meta.artifact_type,
@@ -520,6 +565,50 @@ def test_approval_uses_active_artifact_and_advances_workflow(tmp_path):
         "version": 1,
     }
     assert response.json()["data"]["state"] == "waiting_manual_execution"
+
+
+def test_risk_acceptance_advances_requirement_review_to_analysis(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_requirement_review(tmp_path, state=WorkflowState.WAITING_PRODUCT_REVISION)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "risk_acceptance",
+                "decision": "approved",
+                "decided_by": "product-owner",
+                "comment": "已知登录锁定规则暂缺，但本轮先按现网行为开展测试，产品负责人跟进补充。",
+            },
+        )
+        workflow = client.get("/api/v1/projects/demo/workflow")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["target_artifact"] == {
+        "artifact_id": "review-001",
+        "artifact_type": "requirement_review",
+        "version": 1,
+    }
+    assert response.json()["data"]["state"] == "requirement_analyzing"
+    assert workflow.json()["data"]["state"] == "requirement_analyzing"
+    assert "已知登录锁定规则暂缺" in workflow.json()["data"]["transition_history"][-1]["reason"]
+
+
+def test_risk_acceptance_requires_a_reason(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_requirement_review(tmp_path, state=WorkflowState.WAITING_PRODUCT_REVISION)
+        response = client.post(
+            "/api/v1/projects/demo/approvals",
+            json={
+                "approval_type": "risk_acceptance",
+                "decision": "approved",
+                "decided_by": "product-owner",
+                "comment": "   ",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "INVALID_REQUEST"
 
 
 def test_testcase_changes_requested_returns_to_revision(tmp_path):

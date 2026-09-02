@@ -138,6 +138,7 @@ class WorkflowStatusData(BaseModel):
     awaiting_human: bool
     available_states: list[str]
     input_files: list[dict[str, Any]]
+    current_requirement_input_id: str | None = None
     active_artifacts: dict[str, dict[str, Any]]
     transition_history: list[dict[str, Any]]
     revision_rounds: dict[str, int]
@@ -178,8 +179,13 @@ class SubmitApprovalRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_comment_for_non_approval(self) -> "SubmitApprovalRequest":
-        if self.decision is not ApprovalDecision.APPROVED and not self.comment.strip():
-            raise ValueError("comment is required when approval is not approved")
+        if (
+            self.decision is not ApprovalDecision.APPROVED
+            or self.approval_type is ApprovalType.RISK_ACCEPTANCE
+        ) and not self.comment.strip():
+            raise ValueError(
+                "comment is required for non-approval decisions and risk acceptance"
+            )
         return self
 
 

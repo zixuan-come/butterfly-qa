@@ -53,6 +53,7 @@ from ..storage import ArtifactStore, ArtifactStoreError
 from ..workflow.models import ArtifactPointer, WorkflowRun
 from ..workflow.state_machine import WorkflowStateMachine
 from ..workflow.states import WorkflowState
+from .run_tasks import WorkflowRunTask, WorkflowTaskManager
 from .models import (
     ActiveArtifactData,
     AgentRunSummary,
@@ -99,6 +100,7 @@ _HUMAN_STATES = {
 }
 
 _APPROVAL_TARGET_TYPES = {
+    ApprovalType.RISK_ACCEPTANCE: "requirement_review",
     ApprovalType.TESTCASE_APPROVAL: "test_design",
     ApprovalType.REPORT_APPROVAL: "test_report",
 }
@@ -148,6 +150,7 @@ def create_app(
     app.state.max_upload_bytes = max_upload_bytes
     app.state.max_text_preview_bytes = max_text_preview_bytes
     app.state.project_locks = {}
+    app.state.workflow_tasks = WorkflowTaskManager(resolved_workspace)
     static_root = Path(__file__).parent / "static"
     app.state.static_root = static_root
     app.add_middleware(
@@ -651,7 +654,7 @@ def create_app(
 
     @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/runs",
-        response_model=ApiResponse[WorkflowStepData],
+        response_model=ApiResponse[WorkflowStepData | WorkflowRunTask],
         tags=["workflow"],
     )
     def run_workflow_step(
@@ -659,7 +662,91 @@ def create_app(
         payload: RunWorkflowRequest,
         request: Request,
         module_id: str | None = None,
-    ) -> ApiResponse[WorkflowStepData]:
+        async_run: bool = False,
+    ) -> ApiResponse[WorkflowStepData | WorkflowRunTask]:
+        if async_run:
+            _load_project(_context_manager(request, project_id, module_id), project_id)
+            task_manager = request.app.state.workflow_tasks
+
+            def worker(_task_store, run_id):
+                try:
+                    task_manager.update(
+                        project_id,
+                        run_id,
+                        module_id,
+                        status="running",
+                        stage="流程执行",
+                        current_step="调用主流程 Agent",
+                        message="正在判断当前阶段的下一步动作",
+                    )
+                    response = run_workflow_step(
+                        project_id, payload, request, module_id, async_run=False
+                    )
+                    data = response.data
+                    is_human = bool(
+                        data
+                        and data.action
+                        and data.action.get("action")
+                        in {"wait_human", "manual_intervention"}
+                    )
+                    task_manager.update(
+                        project_id,
+                        run_id,
+                        module_id,
+                        status="needs_human" if is_human else "succeeded",
+                        stage="人工决策" if is_human else "流程完成",
+                        current_step="等待人工处理" if is_human else "执行完成",
+                        message=(
+                            "Agent 已完成分析，等待人工决策"
+                            if is_human
+                            else "流程步骤已完成，页面状态即将刷新"
+                        ),
+                        result=data.model_dump(mode="json") if data else None,
+                        completed=True,
+                    )
+                except ApiError as exc:
+                    result_data = exc.data if isinstance(exc.data, dict) else None
+                    agent_status = (result_data or {}).get("agent", {}).get("status")
+                    task_manager.update(
+                        project_id,
+                        run_id,
+                        module_id,
+                        status=(
+                            "needs_human"
+                            if agent_status == "needs_human"
+                            else "failed"
+                        ),
+                        stage=(
+                            "人工介入"
+                            if agent_status == "needs_human"
+                            else "流程执行"
+                        ),
+                        current_step=(
+                            "等待人工处理"
+                            if agent_status == "needs_human"
+                            else "执行失败"
+                        ),
+                        message=exc.message,
+                        error=exc.message,
+                        result=result_data,
+                        completed=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    task_manager.update(
+                        project_id,
+                        run_id,
+                        module_id,
+                        status="failed",
+                        stage="流程执行",
+                        current_step="执行异常",
+                        message="后台执行发生未处理异常",
+                        error=f"{type(exc).__name__}: {exc}",
+                        completed=True,
+                    )
+
+            task = task_manager.submit(project_id, module_id, worker)
+            return _success(request, task, message="流程任务已开始执行")
+
         workspace = request.app.state.workspace
         store = _artifact_store(request, module_id)
         with _project_lock(request, project_id, module_id):
@@ -712,6 +799,43 @@ def create_app(
             )
         return _success(request, response_data, message="流程步骤执行完成")
 
+    @app.get(
+        f"{API_PREFIX}/projects/{{project_id}}/runs/latest",
+        response_model=ApiResponse[WorkflowRunTask | None],
+        tags=["workflow"],
+    )
+    def get_latest_workflow_run(
+        project_id: str,
+        request: Request,
+        module_id: str | None = None,
+    ) -> ApiResponse[WorkflowRunTask | None]:
+        _load_project(_context_manager(request, project_id, module_id), project_id)
+        task = request.app.state.workflow_tasks.store.latest(project_id, module_id)
+        return _success(request, task)
+
+    @app.get(
+        f"{API_PREFIX}/projects/{{project_id}}/runs/{{run_id}}",
+        response_model=ApiResponse[WorkflowRunTask],
+        tags=["workflow"],
+    )
+    def get_workflow_run(
+        project_id: str,
+        run_id: str,
+        request: Request,
+        module_id: str | None = None,
+    ) -> ApiResponse[WorkflowRunTask]:
+        _load_project(_context_manager(request, project_id, module_id), project_id)
+        try:
+            task = request.app.state.workflow_tasks.store.load(
+                project_id, run_id, module_id
+            )
+        except ArtifactStoreError as exc:
+            raise ApiError(
+                http_status=status.HTTP_404_NOT_FOUND,
+                code="WORKFLOW_RUN_NOT_FOUND",
+                message="流程运行任务不存在",
+            ) from exc
+        return _success(request, task)
     @app.post(
         f"{API_PREFIX}/projects/{{project_id}}/approvals",
         response_model=ApiResponse[ApprovalData],
@@ -1221,6 +1345,7 @@ def _workflow_status(
         awaiting_human=workflow.current_state in _HUMAN_STATES,
         available_states=sorted(state.value for state in available_states),
         input_files=[item.model_dump(mode="json") for item in workflow.input_files],
+        current_requirement_input_id=workflow.current_requirement_input_id,
         active_artifacts={
             name: pointer.model_dump(mode="json")
             for name, pointer in workflow.active_artifacts.items()
