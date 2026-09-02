@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from qa_agent.agent_protocol import AgentRequest, AgentRole, AgentStatus
 from qa_agent.codex_runner import CodexAgentRunner
-from qa_agent.workflow.models import InputFilePointer
+from qa_agent.workflow.models import ArtifactPointer, InputFilePointer
 
 
 def schema_contains_key(value, target):
@@ -195,3 +195,40 @@ def test_codex_runner_rejects_working_directory_outside_project_root(tmp_path):
     assert response.status is AgentStatus.FAILED
     assert response.error_type == "ValueError"
     assert "outside project root" in response.error_message
+
+
+def test_requirement_analysis_prompt_declares_current_requirement_scope(tmp_path):
+    runner = CodexAgentRunner(tmp_path, codex_factory=lambda: None)
+    contract = tmp_path / "agents" / "test-analysis-design-agent.md"
+    skill = tmp_path / "skills" / "requirement-analysis" / "SKILL.md"
+    contract.parent.mkdir()
+    skill.parent.mkdir(parents=True)
+    contract.write_text("agent contract", encoding="utf-8")
+    skill.write_text("skill instructions", encoding="utf-8")
+
+    prompt = runner.build_prompt(
+        make_request(
+            skill_name="requirement-analysis",
+            task_name="requirement-analysis",
+            input_files=[
+                InputFilePointer(
+                    input_id="requirement-v2",
+                    category="requirement",
+                    relative_path="input/requirement-v2.md",
+                    sha256="b" * 64,
+                )
+            ],
+            input_artifacts=[
+                ArtifactPointer(
+                    artifact_id="review-v2",
+                    artifact_type="requirement_review",
+                    version=2,
+                )
+            ],
+        )
+    )
+
+    assert "需求版本约束" in prompt
+    assert "当前有效需求版本" in prompt
+    assert "历史 requirement 文件" in prompt
+    assert "requirement_review" in prompt

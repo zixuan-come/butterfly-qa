@@ -159,6 +159,14 @@ class CodexAgentRunner(AgentRunner):
             f"[sha256={item.sha256}]"
             for item in request.input_files
         ) or "- 无原始输入文件"
+        if request.skill_name == "requirement-analysis":
+            sections.append(
+                "# 需求版本约束\n\n"
+                "本次 request 中 category=requirement 的文件即为当前有效需求版本。"
+                "不要读取工作区中的历史 requirement 文件，也不要把历史版本混入当前业务事实。\n"
+                "必须同时结合 input_artifacts 中的最新 requirement_review 产物。"
+            )
+
         sections.append(
             "# 本次任务\n"
             f"request_id: {request.request_id}\n"
