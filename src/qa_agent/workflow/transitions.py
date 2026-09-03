@@ -94,6 +94,8 @@ ALLOWED_TRANSITIONS: dict[WorkflowState, frozenset[WorkflowState]] = {
             WorkflowState.REQUIREMENT_ANALYZING,
             WorkflowState.TESTCASE_DESIGNING,
             WorkflowState.TESTCASE_REVIEWING,
+            WorkflowState.WAITING_CASE_REVISION,
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
             WorkflowState.WAITING_MANUAL_EXECUTION,
             WorkflowState.GENERATING_REPORT,
             WorkflowState.CANCELLED,

@@ -1650,6 +1650,7 @@ async function submitDelete() {
             <div class="panel-header-actions">
               <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadTestDesign('markdown')"><Download :size="14" />Markdown</button>
               <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadTestDesign('json')"><Download :size="14" />JSON</button>
+              <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadTestDesign('xlsx')"><Download :size="14" />Excel</button>
               <button class="button secondary small" type="button" :disabled="runningWorkflow" @click="continueWorkflow"><Sparkles :size="15" />生成用例</button>
             </div>
           </div>

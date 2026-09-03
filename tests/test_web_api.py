@@ -1,5 +1,7 @@
 import json
 from datetime import datetime, timezone
+from io import BytesIO
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1165,8 +1167,42 @@ def test_test_design_download_rejects_unknown_format(tmp_path):
         )
         response = client.get(
             "/api/v1/projects/demo/artifacts/test_design/download",
-            params={"format": "xlsx"},
+            params={"format": "csv"},
         )
 
     assert response.status_code == 400
     assert response.json()["code"] == "UNSUPPORTED_ARTIFACT_FORMAT"
+
+def test_test_design_downloads_current_xlsx(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(
+            tmp_path,
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+        )
+        response = client.get(
+            "/api/v1/projects/demo/artifacts/test_design/download",
+            params={"format": "csv"},
+        )
+
+    assert response.status_code == 200
+    assert "attachment" in response.headers["content-disposition"]
+    assert (
+        response.headers["content-type"]
+        == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert response.content.startswith(b"PK")
+    with ZipFile(BytesIO(response.content)) as workbook:
+        assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+        assert "xl/worksheets/sheet2.xml" in workbook.namelist()
+        assert "TC-001" in workbook.read("xl/worksheets/sheet1.xml").decode()
+        assert "保存成功" in workbook.read("xl/worksheets/sheet2.xml").decode()
+    assert (
+        tmp_path
+        / "projects"
+        / "demo"
+        / "artifacts"
+        / "test_design"
+        / "design-001"
+        / "v1.xlsx"
+    ).is_file()

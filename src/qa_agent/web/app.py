@@ -51,6 +51,7 @@ from ..schemas import (
 )
 from ..storage import ArtifactStore, ArtifactStoreError
 from ..test_design_rendering import render_test_design
+from ..test_design_xlsx import save_test_design_xlsx
 from ..workflow.models import ArtifactPointer, WorkflowRun
 from ..workflow.state_machine import WorkflowStateMachine
 from ..workflow.states import WorkflowState
@@ -1197,11 +1198,13 @@ def create_app(
         format: str,
         module_id: str | None = None,
     ) -> FileResponse:
-        if format not in {"markdown", "json"}:
+        if format not in {"markdown", "json", "xlsx"} or (
+            format == "xlsx" and artifact_type != "test_design"
+        ):
             raise ApiError(
                 http_status=status.HTTP_400_BAD_REQUEST,
                 code="UNSUPPORTED_ARTIFACT_FORMAT",
-                message="下载格式仅支持 markdown 或 json",
+                message="测试用例下载格式支持 markdown、json 或 xlsx",
             )
 
         store = _artifact_store(request, module_id)
@@ -1225,6 +1228,20 @@ def create_app(
             path = artifact_dir / f"v{pointer.version}.json"
             media_type = "application/json"
             extension = "json"
+        elif format == "xlsx":
+            path = artifact_dir / f"v{pointer.version}.xlsx"
+            if not path.is_file():
+                content = store.load_artifact(
+                    project_id,
+                    pointer.artifact_type,
+                    pointer.artifact_id,
+                    pointer.version,
+                )
+                save_test_design_xlsx(content, path)
+            media_type = (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            extension = "xlsx"
         else:
             path = artifact_dir / f"v{pointer.version}.md"
             if not path.is_file() and pointer.artifact_type == "test_design":
@@ -1248,7 +1265,7 @@ def create_app(
             raise ApiError(
                 http_status=status.HTTP_404_NOT_FOUND,
                 code="ARTIFACT_RENDERING_NOT_FOUND",
-                message="当前产物没有可下载的 Markdown 文件",
+                message="当前产物没有可下载的文件",
             )
 
         return FileResponse(

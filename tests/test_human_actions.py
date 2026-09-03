@@ -19,6 +19,8 @@ from qa_agent.schemas import (
     RequirementReview as RequirementReviewModel,
     ReviewDecision,
     TestCase as CaseModel,
+    TestCaseReview as CaseReviewModel,
+    TestCaseReviewIssue as CaseReviewIssueModel,
     TestDesign as DesignModel,
     TestPoint as PointModel,
     TestStep as StepModel,
@@ -126,6 +128,34 @@ def make_design() -> DesignModel:
     )
 
 
+def make_case_review(decision: ReviewDecision = ReviewDecision.FAIL) -> CaseReviewModel:
+    timestamp = now()
+    return CaseReviewModel(
+        meta=ArtifactMeta(
+            artifact_id="case-review-001",
+            artifact_type="testcase_review",
+            project_id="demo-project",
+            status=ArtifactStatus.COMPLETED,
+            source_artifacts=["design-001"],
+            created_by="testcase-review-agent",
+            created_at=timestamp,
+            updated_at=timestamp,
+        ),
+        decision=decision,
+        issues=[
+            CaseReviewIssueModel(
+                issue_id="CR-001",
+                case_id="TC-001",
+                severity="high",
+                issue_type="missing_boundary",
+                description="缺少边界场景",
+                evidence="TP-001 未覆盖边界值",
+                suggestion="补充边界用例",
+            )
+        ],
+        coverage_summary="存在一个高风险覆盖缺口",
+    )
+
 def make_execution(case_ids=("TC-001", "TC-002")) -> ExecutionBatch:
     timestamp = now()
     return ExecutionBatch(
@@ -169,6 +199,51 @@ def test_testcase_approval_advances_to_manual_execution(tmp_path):
     assert workflow.current_state is WorkflowState.WAITING_MANUAL_EXECUTION
     assert store.load_decision("demo-project", "approval-approved")["decision"] == "approved"
 
+
+def test_failed_testcase_review_requires_reason_for_risk_approval(tmp_path):
+    workflow = make_workflow(WorkflowState.WAITING_TESTCASE_APPROVAL)
+    review = make_case_review()
+    workflow.active_artifacts["testcase_review"] = ArtifactPointer(
+        artifact_id=review.meta.artifact_id,
+        artifact_type=review.meta.artifact_type,
+        version=review.meta.version,
+    )
+    store = ArtifactStore(tmp_path)
+    store.save_artifact(make_design())
+    store.save_artifact(review)
+
+    with pytest.raises(HumanActionError, match="approval comment is required"):
+        HumanApprovalService(workflow, store).submit(
+            make_approval(ApprovalDecision.APPROVED)
+        )
+
+
+def test_failed_testcase_review_can_be_approved_with_recorded_risk(tmp_path):
+    workflow = make_workflow(WorkflowState.WAITING_TESTCASE_APPROVAL)
+    review = make_case_review()
+    review_pointer = ArtifactPointer(
+        artifact_id=review.meta.artifact_id,
+        artifact_type=review.meta.artifact_type,
+        version=review.meta.version,
+    )
+    workflow.active_artifacts["testcase_review"] = review_pointer
+    store = ArtifactStore(tmp_path)
+    store.save_artifact(make_design())
+    store.save_artifact(review)
+
+    transition = HumanApprovalService(workflow, store).submit(
+        make_approval(
+            ApprovalDecision.APPROVED,
+            "接受当前覆盖风险，测试执行阶段重点补充验证。",
+        )
+    )
+
+    assert transition.to_state is WorkflowState.WAITING_MANUAL_EXECUTION
+    assert review_pointer in transition.related_artifacts
+    assert any(
+        pointer.artifact_type == "human_approval"
+        for pointer in transition.related_artifacts
+    )
 
 def test_risk_acceptance_advances_requirement_review_to_analysis(tmp_path):
     timestamp = now()

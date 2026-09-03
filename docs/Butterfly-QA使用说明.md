@@ -246,7 +246,7 @@ butterfly-qa status $ProjectId --json
 butterfly-qa run $ProjectId
 ```
 
-重新评审通过前，不应进入测试用例设计。
+默认情况下，重新评审通过前不进入测试用例设计。如果产品或需求负责人确认问题属于可接受风险，可以在页面的“人工决策”区域选择“已知风险，强制进入需求分析”，填写风险接受理由后放行。该操作不会删除或覆盖 AI 评审产物，后续人员仍可从左侧“需求评审”阶段查看完整风险清单。
 
 ## 9. 检查并审批测试用例
 
@@ -418,7 +418,7 @@ completed
 | --- | --- | --- |
 | `requirement_received` | Agent | 执行一次 `run` |
 | `requirement_reviewing` | Agent | 检查产物，无错误后再 `run` |
-| `waiting_product_revision` | 产品/需求负责人 | 修订并导入新需求，再 `run` |
+| `waiting_product_revision` | 产品/需求负责人 | 修订并导入新需求再 `run`，或在确认风险后选择人工强制放行 |
 | `requirement_analyzing` | Agent | 检查产物，无错误后再 `run` |
 | `testcase_designing` | Agent | 检查产物，无错误后再 `run` |
 | `testcase_reviewing` | Agent | 检查产物，无错误后再 `run` |

@@ -38,7 +38,7 @@
 | `waiting_product_revision` | 等待产品提交正式需求修订 | `requirement_reviewing` |
 | `requirement_analyzing` | 启动结构化需求分析 | `testcase_designing` |
 | `testcase_designing` | 启动测试点和功能用例设计 | `testcase_reviewing` |
-| `testcase_reviewing` | 根据独立评审结论分流 | `waiting_testcase_approval` 或 `waiting_case_revision` |
+| `testcase_reviewing` | 评审完成后提交测试负责人决策（AI 结论仅作建议） | `waiting_testcase_approval` |
 | `waiting_case_revision` | 发起用例修订 | `testcase_designing` |
 | `waiting_testcase_approval` | 等待测试人员确认 | `waiting_manual_execution` 或 `waiting_case_revision` |
 | `waiting_manual_execution` | 接收人工执行结果和证据 | `generating_report` |
@@ -46,6 +46,8 @@
 | `waiting_report_approval` | 等待报告确认 | `completed` 或 `generating_report` |
 
 表中的目标状态只是业务建议。实际转换必须经过 `WorkflowStateMachine` 校验，主流程 Agent 不得自行修改状态。
+
+测试用例评审产物生成后，无论 `decision` 是 `pass`、`fail` 还是 `needs_human_decision`，都必须进入 `waiting_testcase_approval`。AI 负责指出问题和风险，测试负责人负责最终批准或退回修订；不得让 AI 的结论绕过人工质量门禁。
 
 ## 输入要求
 

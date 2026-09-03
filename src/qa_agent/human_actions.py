@@ -70,6 +70,31 @@ class HumanApprovalService:
             )
         target_state = decisions[approval.decision]
         self._validate_target_artifact(approval)
+        related_artifacts = [
+            ArtifactPointer(
+                artifact_id=approval.target_artifact_id,
+                artifact_type=approval.target_artifact_type,
+                version=approval.target_artifact_version,
+            ),
+        ]
+        if approval.approval_type is ApprovalType.TESTCASE_APPROVAL:
+            review = self.workflow.active_artifacts.get("testcase_review")
+            if review is not None:
+                review_payload = self.store.load_artifact(
+                    self.workflow.project_id,
+                    review.artifact_type,
+                    review.artifact_id,
+                    review.version,
+                )
+                if (
+                    approval.decision is ApprovalDecision.APPROVED
+                    and review_payload.get("decision") != "pass"
+                    and not approval.comment.strip()
+                ):
+                    raise HumanActionError(
+                        "approval comment is required when accepting testcase review risks"
+                    )
+                related_artifacts.append(review)
         validate_transition(self.workflow.current_state, target_state)
 
         self.store.save_decision(
@@ -90,12 +115,8 @@ class HumanApprovalService:
             target_state,
             triggered_by=approval.decided_by,
             reason=approval.comment or f"人工审批结论：{approval.decision.value}",
-            related_artifacts=[
-                ArtifactPointer(
-                    artifact_id=approval.target_artifact_id,
-                    artifact_type=approval.target_artifact_type,
-                    version=approval.target_artifact_version,
-                ),
+            related_artifacts=related_artifacts
+            + [
                 ArtifactPointer(
                     artifact_id=approval.meta.artifact_id,
                     artifact_type=approval.meta.artifact_type,
