@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   AlertTriangle,
   ArrowRight,
@@ -42,6 +42,7 @@ import {
 } from 'lucide-vue-next'
 import { stages as stageDefinitions } from './data'
 import {
+  artifactDownloadUrl,
   createFeatureModule,
   createProject,
   deleteFeatureModule,
@@ -54,7 +55,9 @@ import {
   listFeatureModules,
   listProjects,
   projectInputContentUrl,
-  runWorkflow,
+  getLatestWorkflowRun,
+  getWorkflowRun,
+  startWorkflowRun,
   submitApproval,
   submitExecution,
   updateFeatureModule,
@@ -135,6 +138,13 @@ const currentSteps = reactive({
   execution: 0,
   report: 0,
 })
+const reachedSteps = reactive({
+  'requirement-review': 0,
+  'case-design': 0,
+  'case-review': 0,
+  execution: 0,
+  report: 0,
+})
 const theme = ref(localStorage.getItem('butterfly-theme') || 'light')
 const findingFilter = ref('全部')
 const selectedFindingId = ref('F-001')
@@ -194,6 +204,8 @@ const creatingProject = ref(false)
 const creatingModule = ref(false)
 const uploadingRequirement = ref(false)
 const runningWorkflow = ref(false)
+const activeRun = ref(null)
+let runPollingTimer = null
 const requirementFileInput = ref(null)
 const syncLabel = ref('正在连接')
 const newProject = reactive({
@@ -215,6 +227,30 @@ const approvalDialog = reactive({
 })
 let toastTimer
 
+const runStatusLabels = {
+  queued: '排队中',
+  running: '执行中',
+  succeeded: '已完成',
+  failed: '执行失败',
+  needs_human: '等待人工',
+}
+const runStatusTone = computed(() => {
+  if (!activeRun.value) return 'idle'
+  if (activeRun.value.status === 'succeeded') return 'completed'
+  if (activeRun.value.status === 'failed') return 'failed'
+  if (activeRun.value.status === 'needs_human') return 'waiting'
+  return 'active'
+})
+const runStatusLabel = computed(() => runStatusLabels[activeRun.value?.status] || '暂无任务')
+const runElapsedLabel = computed(() => {
+  if (!activeRun.value?.started_at) return '0 秒'
+  const end = activeRun.value.completed_at ? new Date(activeRun.value.completed_at) : new Date()
+  const seconds = Math.max(0, Math.floor((end - new Date(activeRun.value.started_at)) / 1000))
+  if (seconds < 60) return `${seconds} 秒`
+  return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+})
+const runTimeline = computed(() => [...(activeRun.value?.timeline || [])].reverse())
+const runFailureReason = computed(() => activeRun.value?.result?.agent?.error_message || activeRun.value?.result?.error || activeRun.value?.error || '')
 const workflowStageId = computed(() => stateStage[workflow.value?.state] || 'requirement-review')
 const workflowStageIndex = computed(() => (
   stageDefinitions.findIndex((stage) => stage.id === workflowStageId.value)
@@ -226,13 +262,13 @@ const stages = computed(() => stageDefinitions.map((stage, index) => {
       ? (artifacts.testcase_review?.issues || []).length
       : 0
   if (!workflow.value) {
-    return { ...stage, status: index === 0 ? '尚未开始' : '待开始', tone: 'idle', issueCount: 0 }
+    return { ...stage, status: index === 0 ? '尚未开始' : '待开始', tone: 'idle', issueCount: 0, available: index === 0 }
   }
   if (workflow.value.state === 'completed') {
-    return { ...stage, status: '已完成', tone: 'completed', issueCount: 0 }
+    return { ...stage, status: '已完成', tone: 'completed', issueCount: 0, available: true }
   }
   if (index < workflowStageIndex.value) {
-    return { ...stage, status: '已完成', tone: 'completed', issueCount: 0 }
+    return { ...stage, status: '已完成', tone: 'completed', issueCount: 0, available: true }
   }
   if (index === workflowStageIndex.value) {
     return {
@@ -240,9 +276,10 @@ const stages = computed(() => stageDefinitions.map((stage, index) => {
       status: stateLabels[workflow.value.state] || workflow.value.state,
       tone: humanWaitingStates.has(workflow.value.state) ? 'waiting' : 'active',
       issueCount,
+      available: true,
     }
   }
-  return { ...stage, status: '待开始', tone: 'idle', issueCount: 0 }
+  return { ...stage, status: '待开始', tone: 'idle', issueCount: 0, available: false }
 }))
 const activeStage = computed(() => stages.value.find((stage) => stage.id === activeStageId.value))
 const currentProjectName = computed(() => currentProject.value?.name || '尚未选择项目')
@@ -254,6 +291,12 @@ const currentContextId = computed(() => (
 ))
 const currentStateLabel = computed(() => (
   stateLabels[workflow.value?.state] || (workflow.value ? workflow.value.state : '新建或选择项目')
+))
+const requirementRiskAccepted = computed(() => (
+  workflow.value?.transition_history?.some((event) => (
+    event.to_state === 'requirement_analyzing'
+    && event.related_artifacts?.some((artifact) => artifact.artifact_type === 'human_approval')
+  )) || false
 ))
 const workflowProgress = computed(() => {
   if (!workflow.value) return 0
@@ -409,13 +452,79 @@ onMounted(async () => {
   await loadProjects()
 })
 
+onBeforeUnmount(() => {
+  stopRunPolling()
+})
+
+function stopRunPolling() {
+  if (runPollingTimer) {
+    clearTimeout(runPollingTimer)
+    runPollingTimer = null
+  }
+}
+
+function scheduleRunPolling(projectId, moduleId, runId) {
+  stopRunPolling()
+  runPollingTimer = setTimeout(
+    () => pollWorkflowRun(projectId, moduleId, runId),
+    1200,
+  )
+}
+
+async function pollWorkflowRun(projectId, moduleId, runId) {
+  try {
+    const task = await getWorkflowRun(projectId, runId, moduleId)
+    if (currentProject.value?.project_id !== projectId
+      || (currentModule.value?.module_id || null) !== moduleId
+      || activeRun.value?.run_id !== runId) return
+    activeRun.value = task
+    runningWorkflow.value = ['queued', 'running'].includes(task.status)
+    syncLabel.value = runningWorkflow.value ? 'Agent 运行中' : '已同步'
+    if (runningWorkflow.value) {
+      scheduleRunPolling(projectId, moduleId, runId)
+      return
+    }
+    if (task.status === 'succeeded') showToast('流程步骤执行完成，页面已刷新')
+    if (task.status === 'needs_human') showToast('Agent 执行完成，请处理人工决策')
+    if (task.status === 'failed') showToast(task.error || '流程执行失败，请查看执行详情')
+    await refreshCurrentProject()
+  } catch (error) {
+    if (activeRun.value?.run_id !== runId) return
+    scheduleRunPolling(projectId, moduleId, runId)
+  }
+}
+
+async function restoreLatestRun(workflowData, requestId) {
+  stopRunPolling()
+  const projectId = workflowData.project_id
+  const moduleId = currentModule.value?.module_id || null
+  try {
+    const task = await getLatestWorkflowRun(projectId, moduleId)
+    if (requestId !== contextRequestId) return
+    activeRun.value = task
+    runningWorkflow.value = Boolean(task && ['queued', 'running'].includes(task.status))
+    if (runningWorkflow.value) scheduleRunPolling(projectId, moduleId, task.run_id)
+  } catch (error) {
+    if (requestId !== contextRequestId) return
+    activeRun.value = null
+    runningWorkflow.value = false
+  }
+}
+
 function switchStage(id) {
+  const stage = stages.value.find((item) => item.id === id)
+  if (!stage?.available) return
   activeStageId.value = id
   sidebarOpen.value = false
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
+function isStepAvailable(index) {
+  return index <= (reachedSteps[activeStageId.value] ?? 0)
+}
+
 function setCurrentStep(index) {
+  if (!isStepAvailable(index)) return
   currentSteps[activeStageId.value] = index
 }
 
@@ -529,8 +638,24 @@ async function applyWorkflowContext(workflowData, requestId = contextRequestId) 
   ])
   if (requestId !== contextRequestId) return
   activeStageId.value = stateStage[workflowData.state] || activeStageId.value
-  currentSteps[activeStageId.value] = stateStep[workflowData.state] || 0
-  syncLabel.value = '已同步'
+  const activeIndex = stageDefinitions.findIndex((stage) => stage.id === activeStageId.value)
+  stageDefinitions.forEach((stage, index) => {
+    let reached = 0
+    if (workflowData.state === 'completed' || index < activeIndex) {
+      reached = stage.steps.length - 1
+    } else if (index === activeIndex) {
+      reached = stateStep[workflowData.state] || 0
+      if (workflowData.state === 'requirement_reviewing'
+        && (workflowData.revision_rounds?.requirement || 0) > 0) reached = 3
+      if (workflowData.state === 'testcase_reviewing'
+        && (workflowData.revision_rounds?.testcase || 0) > 0) reached = 3
+    }
+    reachedSteps[stage.id] = reached
+    currentSteps[stage.id] = reached
+  })
+  await restoreLatestRun(workflowData, requestId)
+  if (requestId !== contextRequestId) return
+  syncLabel.value = activeRun.value && runningWorkflow.value ? 'Agent 运行中' : '已同步'
 }
 async function refreshCurrentProject() {
   if (!currentProject.value) return
@@ -753,32 +878,50 @@ function downloadConfirmationChecklist() {
   URL.revokeObjectURL(url)
 }
 
+function downloadTestDesign(format) {
+  if (!currentProject.value || !artifacts.test_design) {
+    showToast('当前没有可下载的测试用例')
+    return
+  }
+  const link = document.createElement('a')
+  link.href = artifactDownloadUrl(
+    currentProject.value.project_id,
+    'test_design',
+    format,
+    currentModule.value?.module_id || null,
+  )
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
 async function continueWorkflow() {
   if (!currentProject.value) {
     openCreateProject()
     return
   }
+  const projectId = currentProject.value.project_id
+  const moduleId = currentModule.value?.module_id || null
   runningWorkflow.value = true
   syncLabel.value = 'Agent 运行中'
   try {
-    const result = await runWorkflow(
-      currentProject.value.project_id,
-      null,
-      currentModule.value?.module_id,
-    )
-    await refreshCurrentProject()
-    const reason = result.action?.reason || '流程步骤执行完成'
-    showToast(reason)
+    const task = await startWorkflowRun(projectId, null, moduleId)
+    activeRun.value = task
+    scheduleRunPolling(projectId, moduleId, task.run_id)
+    showToast('流程任务已开始，可在进度面板查看执行状态')
   } catch (error) {
-    await refreshCurrentProject()
-    showToast(error.message)
-  } finally {
     runningWorkflow.value = false
+    syncLabel.value = '同步失败'
+    showToast(error.message)
   }
 }
 
 async function submitTestcaseApproval() {
   if (!currentProject.value || workflow.value?.state !== 'waiting_testcase_approval') return
+  if (artifacts.testcase_review?.decision !== 'pass') {
+    openApprovalDialog('testcase_approval', 'approved')
+    return
+  }
   await submitApprovalAction('testcase_approval', 'approved')
 }
 
@@ -787,14 +930,25 @@ async function submitReportApproval() {
   await submitApprovalAction('report_approval', 'approved')
 }
 
+function submitRiskAcceptance() {
+  if (!currentProject.value || workflow.value?.state !== 'waiting_product_revision') return
+  openApprovalDialog('risk_acceptance', 'approved')
+}
+
 function openApprovalDialog(approvalType, decision) {
   const expectedState = approvalType === 'testcase_approval'
     ? 'waiting_testcase_approval'
-    : 'waiting_report_approval'
+    : approvalType === 'report_approval'
+      ? 'waiting_report_approval'
+      : 'waiting_product_revision'
   if (workflow.value?.state !== expectedState) return
   approvalDialog.approvalType = approvalType
   approvalDialog.decision = decision
-  approvalDialog.title = decision === 'rejected' ? '驳回当前产物' : '要求修改当前产物'
+  approvalDialog.title = approvalType === 'risk_acceptance'
+    ? '确认已知风险，强制进入需求分析'
+    : approvalType === 'testcase_approval' && decision === 'approved'
+      ? '带风险批准测试用例'
+      : decision === 'rejected' ? '驳回当前产物' : '要求修改当前产物'
   approvalDialog.comment = ''
   approvalDialog.open = true
 }
@@ -828,7 +982,9 @@ async function submitApprovalAction(approvalType, decision, comment = '') {
     const successMessage = decision === 'approved'
       ? approvalType === 'testcase_approval'
         ? '测试用例已批准，流程进入测试执行'
-        : '测试报告已批准归档'
+        : approvalType === 'report_approval'
+          ? '测试报告已批准归档'
+          : '已记录风险接受，流程进入需求分析'
       : decision === 'rejected'
         ? '已驳回，流程返回修改阶段'
         : '修改意见已提交，流程返回修订阶段'
@@ -950,6 +1106,7 @@ function formatDateTime(value) {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    timeZone: 'Asia/Shanghai',
   }).format(new Date(value))
 }
 
@@ -1174,6 +1331,8 @@ async function submitDelete() {
           class="stage-item"
           :class="{ active: activeStageId === stage.id }"
           :aria-current="activeStageId === stage.id ? 'step' : undefined"
+          :disabled="!stage.available"
+          :aria-disabled="!stage.available"
           @click="switchStage(stage.id)"
         >
           <span class="stage-rail">
@@ -1228,16 +1387,47 @@ async function submitDelete() {
         </div>
       </section>
 
-      <section class="stepper" aria-label="当前阶段流程">
+      <section v-if="activeRun" class="run-progress-panel" :class="runStatusTone" aria-live="polite">
+        <div class="run-progress-head">
+          <div class="run-progress-title"><span class="run-status-dot"></span><div><div class="eyebrow">流程执行任务</div><h2>{{ runStatusLabel }}</h2></div></div>
+          <span class="run-id">{{ activeRun.run_id }}</span>
+        </div>
+        <div class="run-progress-summary">
+          <div><span>当前阶段</span><strong>{{ activeRun.stage }}</strong></div>
+          <div><span>当前动作</span><strong>{{ activeRun.current_step }}</strong></div>
+          <div><span>已耗时</span><strong>{{ runElapsedLabel }}</strong></div>
+          <div><span>最近更新</span><strong>{{ formatDateTime(activeRun.updated_at) }}</strong></div>
+        </div>
+        <p class="run-progress-message">{{ activeRun.message }}</p>
+        <div class="run-timeline">
+          <div v-for="(event, index) in runTimeline" :key="`${event.occurred_at}-${index}`" class="run-timeline-item">
+            <span class="run-timeline-line"></span><span class="run-timeline-node"></span>
+            <div><strong>{{ event.action }}</strong><small>{{ formatDateTime(event.occurred_at) }} · {{ event.message }}</small></div>
+          </div>
+        </div>
+        <div v-if="runFailureReason" class="run-error"><AlertTriangle :size="15" /><span>{{ runFailureReason }}</span></div>
+      </section>
+      <section
+        class="stepper"
+        :class="{ running: runningWorkflow && activeRun?.status === 'running' && activeStageId === workflowStageId }"
+        aria-label="当前阶段流程"
+      >
         <button
           v-for="(step, index) in activeStage.steps"
           :key="step"
           type="button"
           class="step-item"
-          :class="{ completed: index < currentSteps[activeStageId], active: index === currentSteps[activeStageId] }"
+          :class="{
+            completed: index < reachedSteps[activeStageId],
+            active: index === currentSteps[activeStageId],
+            locked: !isStepAvailable(index),
+            executing: runningWorkflow && activeRun?.status === 'running' && activeStageId === workflowStageId && index === reachedSteps[activeStageId],
+          }"
+          :disabled="!isStepAvailable(index)"
+          :aria-disabled="!isStepAvailable(index)"
           @click="setCurrentStep(index)"
         >
-          <span class="step-node"><Check v-if="index < currentSteps[activeStageId]" :size="14" /><span v-else>{{ index + 1 }}</span></span>
+          <span class="step-node"><Check v-if="index < reachedSteps[activeStageId]" :size="14" /><span v-else>{{ index + 1 }}</span></span>
           <span class="step-label">{{ step }}</span>
         </button>
       </section>
@@ -1368,8 +1558,8 @@ async function submitDelete() {
           <div class="quality-gate">
             <div class="gate-icon"><ShieldCheck :size="20" /></div>
             <div class="gate-copy">
-              <div><strong>需求准入门禁</strong><span :class="artifacts.requirement_review?.decision === 'pass' ? 'verified-chip' : 'gate-blocked'">{{ artifacts.requirement_review?.decision === 'pass' ? '已通过' : '暂未通过' }}</span></div>
-              <p>{{ findings.length ? `${findingCounts['高']} 个高风险问题、${findingCounts['中']} 个中风险问题待处理。` : '等待 AI 完成需求评审并给出准入结论。' }}</p>
+              <div><strong>需求准入门禁</strong><span :class="artifacts.requirement_review?.decision === 'pass' || requirementRiskAccepted ? 'verified-chip' : 'gate-blocked'">{{ requirementRiskAccepted ? '人工放行（风险保留）' : artifacts.requirement_review?.decision === 'pass' ? '已通过' : '暂未通过' }}</span></div>
+              <p>{{ requirementRiskAccepted ? '已记录风险接受，后续阶段仍可从左侧“需求评审”查看 AI 风险清单。' : findings.length ? `${findingCounts['高']} 个高风险问题、${findingCounts['中']} 个中风险问题待处理。` : '等待 AI 完成需求评审并给出准入结论。' }}</p>
             </div>
             <button
               class="button secondary small"
@@ -1381,6 +1571,22 @@ async function submitDelete() {
               <ListChecks v-else :size="14" />
               {{ artifacts.product_confirmation_checklist ? '重新生成清单' : '生成确认清单' }}
             </button>
+          </div>
+
+          <div v-if="workflow?.state === 'waiting_product_revision' && artifacts.requirement_review" class="requirement-decision-panel">
+            <div class="requirement-decision-copy">
+              <div class="eyebrow">人工决策</div>
+              <strong>AI 发现问题后，是否允许继续？</strong>
+              <span>可以上传修订版重新评审，也可以记录风险接受并直接进入需求分析。强制放行不会删除 AI 评审问题，后续可从左侧“需求评审”查看。</span>
+            </div>
+            <div class="requirement-decision-actions">
+              <button class="button secondary" type="button" :disabled="uploadingRequirement || approvalBusy" @click="chooseRequirementFile">
+                <Upload :size="15" />上传修订版并复审
+              </button>
+              <button class="button primary" type="button" :disabled="approvalBusy" @click="submitRiskAcceptance">
+                <ShieldCheck :size="15" />已知风险，强制进入需求分析
+              </button>
+            </div>
           </div>
 
           <div v-if="artifacts.product_confirmation_checklist" class="confirmation-summary">
@@ -1439,7 +1645,14 @@ async function submitDelete() {
           </div>
         </div>
         <div class="panel table-panel">
-          <div class="panel-header compact"><div><div class="eyebrow">用例设计</div><h2>测试用例预览</h2></div><button class="button secondary small" type="button" :disabled="runningWorkflow" @click="continueWorkflow"><Sparkles :size="15" />生成用例</button></div>
+          <div class="panel-header compact">
+            <div><div class="eyebrow">用例设计</div><h2>测试用例预览</h2></div>
+            <div class="panel-header-actions">
+              <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadTestDesign('markdown')"><Download :size="14" />Markdown</button>
+              <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadTestDesign('json')"><Download :size="14" />JSON</button>
+              <button class="button secondary small" type="button" :disabled="runningWorkflow" @click="continueWorkflow"><Sparkles :size="15" />生成用例</button>
+            </div>
+          </div>
           <div class="table-scroll">
             <table>
               <thead><tr><th>用例 ID</th><th>测试用例</th><th>优先级</th><th>类型</th><th>关联需求</th><th>结构状态</th></tr></thead>
@@ -1478,19 +1691,29 @@ async function submitDelete() {
             <h2>{{ workflow?.state === 'waiting_case_revision' ? '等待修订测试用例' : reviewApproved ? '用例集已确认' : '等待测试负责人审批' }}</h2>
             <p>{{ artifacts.testcase_review?.coverage_summary || 'AI 负责发现问题和给出证据，最终准入决定由测试负责人确认。' }}</p>
             <template v-if="workflow?.state === 'waiting_testcase_approval'">
-              <label class="approval-check"><input type="checkbox" :checked="reviewApproved" @change="approveReview" /><span><Check :size="14" /></span>我已检查高风险用例与修订记录</label>
+              <label class="approval-check"><input type="checkbox" :checked="reviewApproved" @change="approveReview" /><span><Check :size="14" /></span>我已检查 AI 评审问题、高风险用例与修订记录</label>
               <div class="approval-actions">
                 <button class="button secondary" type="button" :disabled="approvalBusy" @click="openApprovalDialog('testcase_approval', 'changes_requested')"><RefreshCw :size="15" />要求修改</button>
                 <button class="button danger" type="button" :disabled="approvalBusy" @click="openApprovalDialog('testcase_approval', 'rejected')"><XCircle :size="15" />驳回</button>
                 <button class="button primary approval-primary" type="button" :disabled="!reviewApproved || approvalBusy" @click="submitTestcaseApproval">
                   <LoaderCircle v-if="approvalBusy" class="spin" :size="16" />
-                  <template v-else>确认通过<ArrowRight :size="16" /></template>
+                  <template v-else>{{ artifacts.testcase_review?.decision === 'pass' ? '确认通过' : '带风险批准' }}<ArrowRight :size="16" /></template>
                 </button>
               </div>
             </template>
             <button v-else-if="workflow?.state === 'waiting_case_revision'" class="button primary full-width" type="button" :disabled="runningWorkflow" @click="continueWorkflow">
               <LoaderCircle v-if="runningWorkflow" class="spin" :size="16" />
               <template v-else>开始修订用例<RefreshCw :size="16" /></template>
+            </button>
+            <button
+              v-else-if="workflow?.state === 'manual_intervention_required' && artifacts.testcase_review"
+              class="button primary full-width"
+              type="button"
+              :disabled="runningWorkflow"
+              @click="continueWorkflow"
+            >
+              <LoaderCircle v-if="runningWorkflow" class="spin" :size="16" />
+              <template v-else>进入测试负责人审批<ArrowRight :size="16" /></template>
             </button>
             <div v-else class="approval-state-note">当前流程尚未进入人工审批节点</div>
           </div>
@@ -1654,21 +1877,25 @@ async function submitDelete() {
           <div><div class="eyebrow">人工审批意见</div><h2>{{ approvalDialog.title }}</h2></div>
           <button class="icon-button" type="button" title="关闭" @click="approvalDialog.open = false"><X :size="18" /></button>
         </div>
-        <div class="decision-notice" :class="approvalDialog.decision">
-          <RefreshCw v-if="approvalDialog.decision === 'changes_requested'" :size="18" />
+        <div class="decision-notice" :class="[approvalDialog.decision, { 'risk-acceptance': approvalDialog.approvalType === 'risk_acceptance' || approvalDialog.decision === 'approved' }]">
+          <ShieldCheck v-if="approvalDialog.approvalType === 'risk_acceptance' || approvalDialog.decision === 'approved'" :size="18" />
+          <RefreshCw v-else-if="approvalDialog.decision === 'changes_requested'" :size="18" />
           <XCircle v-else :size="18" />
-          <span><strong>{{ approvalDialog.decision === 'changes_requested' ? '返回修订' : '驳回当前版本' }}</strong><small>审批意见将进入审计记录，并作为下一轮 Agent 修订依据。</small></span>
+          <span>
+            <strong>{{ approvalDialog.approvalType === 'risk_acceptance' ? '记录风险接受并继续' : approvalDialog.decision === 'approved' ? '保留评审风险并进入测试执行' : approvalDialog.decision === 'changes_requested' ? '返回修订' : '驳回当前版本' }}</strong>
+            <small>{{ approvalDialog.approvalType === 'risk_acceptance' || approvalDialog.decision === 'approved' ? '请说明接受哪些风险、为什么可以继续，以及后续由谁关注。该决定会进入审计记录。' : '审批意见将进入审计记录，并作为下一轮 Agent 修订依据。' }}</small>
+          </span>
         </div>
         <label class="form-field">
-          <span>修改意见</span>
-          <textarea v-model.trim="approvalDialog.comment" required maxlength="4000" rows="5" placeholder="请说明需要修改的问题、范围和验收标准"></textarea>
+          <span>{{ approvalDialog.approvalType === 'risk_acceptance' || approvalDialog.decision === 'approved' ? '风险接受理由' : '修改意见' }}</span>
+          <textarea v-model.trim="approvalDialog.comment" required maxlength="4000" rows="5" :placeholder="approvalDialog.approvalType === 'risk_acceptance' || approvalDialog.decision === 'approved' ? '请说明接受的风险、放行理由和后续关注人' : '请说明需要修改的问题、范围和验收标准'"></textarea>
           <small>{{ approvalDialog.comment.length }} / 4000</small>
         </label>
         <div class="modal-actions">
           <button class="button secondary" type="button" @click="approvalDialog.open = false">取消</button>
           <button class="button" :class="approvalDialog.decision === 'rejected' ? 'danger' : 'primary'" type="submit" :disabled="approvalBusy || !approvalDialog.comment.trim()">
             <LoaderCircle v-if="approvalBusy" class="spin" :size="16" />
-            <template v-else>提交审批意见</template>
+            <template v-else>{{ approvalDialog.approvalType === 'risk_acceptance' ? '确认强制放行' : approvalDialog.decision === 'approved' ? '确认带风险批准' : '提交审批意见' }}</template>
           </button>
         </div>
       </form>

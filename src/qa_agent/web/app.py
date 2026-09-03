@@ -50,6 +50,7 @@ from ..schemas import (
     RequirementReview,
 )
 from ..storage import ArtifactStore, ArtifactStoreError
+from ..test_design_rendering import render_test_design
 from ..workflow.models import ArtifactPointer, WorkflowRun
 from ..workflow.state_machine import WorkflowStateMachine
 from ..workflow.states import WorkflowState
@@ -706,7 +707,13 @@ def create_app(
                     )
                 except ApiError as exc:
                     result_data = exc.data if isinstance(exc.data, dict) else None
-                    agent_status = (result_data or {}).get("agent", {}).get("status")
+                    result_agent = (result_data or {}).get("agent", {})
+                    agent_status = result_agent.get("status")
+                    failure_reason = (
+                        result_agent.get("error_message")
+                        or (result_data or {}).get("error")
+                        or exc.message
+                    )
                     task_manager.update(
                         project_id,
                         run_id,
@@ -726,8 +733,8 @@ def create_app(
                             if agent_status == "needs_human"
                             else "执行失败"
                         ),
-                        message=exc.message,
-                        error=exc.message,
+                        message=failure_reason,
+                        error=failure_reason,
                         result=result_data,
                         completed=True,
                     )
@@ -1175,6 +1182,83 @@ def create_app(
                     else None
                 ),
             ),
+        )
+
+
+    @app.get(
+        f"{API_PREFIX}/projects/{{project_id}}/artifacts/{{artifact_type}}/download",
+        response_class=FileResponse,
+        tags=["artifacts"],
+    )
+    def download_active_artifact(
+        project_id: str,
+        artifact_type: str,
+        request: Request,
+        format: str,
+        module_id: str | None = None,
+    ) -> FileResponse:
+        if format not in {"markdown", "json"}:
+            raise ApiError(
+                http_status=status.HTTP_400_BAD_REQUEST,
+                code="UNSUPPORTED_ARTIFACT_FORMAT",
+                message="下载格式仅支持 markdown 或 json",
+            )
+
+        store = _artifact_store(request, module_id)
+        manager = _context_manager(request, project_id, module_id)
+        _, workflow = _load_project(manager, project_id)
+        pointer = workflow.active_artifacts.get(artifact_type)
+        if pointer is None:
+            raise ApiError(
+                http_status=status.HTTP_404_NOT_FOUND,
+                code="ACTIVE_ARTIFACT_NOT_FOUND",
+                message="当前产物不存在",
+            )
+
+        artifact_dir = (
+            store.project_root(project_id)
+            / "artifacts"
+            / pointer.artifact_type
+            / pointer.artifact_id
+        )
+        if format == "json":
+            path = artifact_dir / f"v{pointer.version}.json"
+            media_type = "application/json"
+            extension = "json"
+        else:
+            path = artifact_dir / f"v{pointer.version}.md"
+            if not path.is_file() and pointer.artifact_type == "test_design":
+                content = store.load_artifact(
+                    project_id,
+                    pointer.artifact_type,
+                    pointer.artifact_id,
+                    pointer.version,
+                )
+                path = store.save_artifact_text(
+                    project_id,
+                    pointer.artifact_type,
+                    pointer.artifact_id,
+                    pointer.version,
+                    render_test_design(content),
+                )
+            media_type = "text/markdown; charset=utf-8"
+            extension = "md"
+
+        if not path.is_file():
+            raise ApiError(
+                http_status=status.HTTP_404_NOT_FOUND,
+                code="ARTIFACT_RENDERING_NOT_FOUND",
+                message="当前产物没有可下载的 Markdown 文件",
+            )
+
+        return FileResponse(
+            path,
+            media_type=media_type,
+            filename=f"测试用例-{pointer.artifact_id}-v{pointer.version}.{extension}",
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     if (static_root / "index.html").is_file():

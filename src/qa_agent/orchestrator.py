@@ -29,6 +29,7 @@ from .schemas import (
     TestReport,
 )
 from .storage.artifact_store import ArtifactStore
+from .test_design_rendering import render_test_design
 from .validation.artifact_validator import validate_artifact
 from .workflow.models import ArtifactPointer, InputFilePointer, WorkflowRun, WorkflowTransition
 from .workflow.state_machine import WorkflowStateMachine
@@ -54,6 +55,11 @@ class OrchestrationResult:
 
 class WorkflowOrchestrator:
     """Ask the main-flow agent for one action and execute it through the Harness."""
+
+    _SKILL_ALIASES: dict[str, str] = {
+        # Keep old prompts/workflow records compatible with the canonical directory name.
+        "testcase-review": "testcase-evaluation",
+    }
 
     _ARTIFACT_MODELS: dict[str, type[BaseModel]] = {
         "requirement_review": RequirementReview,
@@ -91,7 +97,10 @@ class WorkflowOrchestrator:
 
         try:
             action = self.parse_action(main_response.output_text)
+            action = self._normalize_expected_output_type(action)
+            action = self._normalize_skill_name(action)
             action = self._normalize_processing_action(action)
+            action = self._normalize_testcase_review_action(action)
             self._validate_action_target(action)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return OrchestrationResult(
@@ -266,6 +275,25 @@ class WorkflowOrchestrator:
                         "open_question_count": len(artifact.get("open_questions") or []),
                     }
                 )
+            elif pointer.artifact_type == "testcase_review":
+                issues = artifact.get("issues") or []
+                severity_counts: dict[str, int] = {}
+                for issue in issues:
+                    severity = str(issue.get("severity") or "unknown")
+                    severity_counts[severity] = severity_counts.get(severity, 0) + 1
+                summary.update(
+                    {
+                        "decision": artifact.get("decision"),
+                        "issue_count": len(issues),
+                        "severity_counts": severity_counts,
+                        "coverage_summary": artifact.get("coverage_summary"),
+                        "routing_effect": (
+                            "AI review is advisory. A completed testcase review must "
+                            "enter waiting_testcase_approval so the test owner can "
+                            "approve with recorded risk or request changes."
+                        ),
+                    }
+                )
             elif pointer.artifact_type == "product_confirmation_checklist":
                 items = artifact.get("items") or []
                 summary.update(
@@ -326,6 +354,51 @@ class WorkflowOrchestrator:
             item for item in self.workflow.input_files if item.category != "requirement"
         ]
         return ([current] if current else []) + non_requirement_inputs
+
+    @staticmethod
+    def _normalize_expected_output_type(action: WorkflowAction) -> WorkflowAction:
+        """Accept the older testcase_design name for the canonical test_design artifact."""
+        if action.expected_output_type != "testcase_design":
+            return action
+        return action.model_copy(update={"expected_output_type": "test_design"})
+
+    @classmethod
+    def _normalize_skill_name(cls, action: WorkflowAction) -> WorkflowAction:
+        """Normalize legacy Skill names before the Harness resolves SKILL.md."""
+        skill_name = action.skill_name
+        if not skill_name:
+            return action
+        canonical_name = cls._SKILL_ALIASES.get(skill_name, skill_name)
+        if canonical_name == skill_name:
+            return action
+        return action.model_copy(update={"skill_name": canonical_name})
+
+    def _normalize_testcase_review_action(
+        self,
+        action: WorkflowAction,
+    ) -> WorkflowAction:
+        """Make the test owner, rather than the AI review, decide the quality gate."""
+        review = self.workflow.active_artifacts.get("testcase_review")
+        if review is None:
+            return action
+        if self.workflow.current_state is WorkflowState.TESTCASE_REVIEWING:
+            pass
+        elif (
+            self.workflow.current_state is WorkflowState.MANUAL_INTERVENTION_REQUIRED
+            and self.workflow.manual_resume_state is WorkflowState.TESTCASE_REVIEWING
+        ):
+            pass
+        else:
+            return action
+
+        return WorkflowAction(
+            action=WorkflowActionType.TRANSITION,
+            target_state=WorkflowState.WAITING_TESTCASE_APPROVAL,
+            reason=(
+                "测试用例评审已完成。AI 评审结论仅作为质量建议，"
+                "由测试负责人决定带风险批准或退回修订。"
+            ),
+        )
 
     def _normalize_processing_action(self, action: WorkflowAction) -> WorkflowAction:
         """Prevent a previously accepted review risk from re-blocking analysis."""
@@ -533,6 +606,15 @@ class WorkflowOrchestrator:
             ).accept(artifact)
             return artifact, saved.json_path, saved.markdown_path, saved.transition
         artifact_path = self.artifact_store.save_artifact(artifact) if self.artifact_store else None
+        markdown_path = None
+        if artifact_type == "test_design" and self.artifact_store is not None:
+            markdown_path = self.artifact_store.save_artifact_text(
+                self.workflow.project_id,
+                artifact.meta.artifact_type,
+                artifact.meta.artifact_id,
+                artifact.meta.version,
+                render_test_design(artifact),
+            )
         pointer = ArtifactPointer(
             artifact_id=artifact.meta.artifact_id,
             artifact_type=artifact.meta.artifact_type,
@@ -541,7 +623,7 @@ class WorkflowOrchestrator:
         self.workflow.active_artifacts[artifact_type] = pointer
         self.workflow.updated_at = datetime.now(timezone.utc)
         self._save_workflow()
-        return artifact, artifact_path, None, None
+        return artifact, artifact_path, markdown_path, None
 
     def _resolve_artifact_refs(self, refs: list[str]) -> list[ArtifactPointer]:
         if not refs:

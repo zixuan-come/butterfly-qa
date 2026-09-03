@@ -1118,3 +1118,55 @@ def test_management_update_missing_resource_returns_not_found(
 
     assert response.status_code == 404
     assert response.json()["data"] is None
+
+
+def test_test_design_downloads_current_markdown_and_json(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(
+            tmp_path,
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+        )
+        markdown = client.get(
+            "/api/v1/projects/demo/artifacts/test_design/download",
+            params={"format": "markdown"},
+        )
+        json_download = client.get(
+            "/api/v1/projects/demo/artifacts/test_design/download",
+            params={"format": "json"},
+        )
+
+    assert markdown.status_code == 200
+    assert "attachment" in markdown.headers["content-disposition"]
+    assert "text/markdown" in markdown.headers["content-type"]
+    assert "保存地址" in markdown.text
+    assert "TC-001" in markdown.text
+    assert (
+        tmp_path
+        / "projects"
+        / "demo"
+        / "artifacts"
+        / "test_design"
+        / "design-001"
+        / "v1.md"
+    ).is_file()
+
+    assert json_download.status_code == 200
+    assert "attachment" in json_download.headers["content-disposition"]
+    assert json_download.json()["meta"]["artifact_id"] == "design-001"
+
+
+def test_test_design_download_rejects_unknown_format(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(
+            tmp_path,
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+        )
+        response = client.get(
+            "/api/v1/projects/demo/artifacts/test_design/download",
+            params={"format": "xlsx"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "UNSUPPORTED_ARTIFACT_FORMAT"

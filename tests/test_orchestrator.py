@@ -88,6 +88,46 @@ def review_payload(project_id="demo-project"):
     )
 
 
+def test_completed_testcase_review_recovers_manual_state_to_owner_approval(tmp_path):
+    workflow = make_workflow()
+    workflow.current_state = WorkflowState.MANUAL_INTERVENTION_REQUIRED
+    workflow.manual_resume_state = WorkflowState.TESTCASE_REVIEWING
+    workflow.active_artifacts["testcase_review"] = ArtifactPointer(
+        artifact_id="case-review-001",
+        artifact_type="testcase_review",
+        version=1,
+    )
+    original = WorkflowAction(
+        action="manual_intervention",
+        target_state=WorkflowState.MANUAL_INTERVENTION_REQUIRED,
+        reason="AI could not route the review result",
+        human_question="请人工决定评审结果",
+    )
+
+    normalized = WorkflowOrchestrator(
+        workflow,
+        QueueRunner([]),
+        artifact_store=ArtifactStore(tmp_path),
+    )._normalize_testcase_review_action(original)
+
+    assert normalized.action.value == "transition"
+    assert normalized.target_state is WorkflowState.WAITING_TESTCASE_APPROVAL
+    assert "测试负责人" in normalized.reason
+
+def test_legacy_testcase_review_skill_name_is_normalized():
+    action = WorkflowAction(
+        action="invoke_agent",
+        target_role=AgentRole.TESTCASE_REVIEW,
+        skill_name="testcase-review",
+        target_state=WorkflowState.TESTCASE_REVIEWING,
+        reason="评审测试用例",
+        expected_output_type="testcase_review",
+    )
+
+    normalized = WorkflowOrchestrator._normalize_skill_name(action)
+
+    assert normalized.skill_name == "testcase-evaluation"
+
 def test_orchestrator_invokes_specialist_and_persists_artifact(tmp_path):
     runner = QueueRunner([action_payload(), review_payload()])
     workflow = make_workflow()

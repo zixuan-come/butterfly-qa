@@ -149,6 +149,27 @@ export function runWorkflow(projectId, model = null, moduleId = null) {
   })
 }
 
+export function startWorkflowRun(projectId, model = null, moduleId = null) {
+  const path = withModule(`/projects/${encodeURIComponent(projectId)}/runs`, moduleId)
+  return request(`${path}${path.includes('?') ? '&' : '?'}async_run=true`, {
+    method: 'POST',
+    body: JSON.stringify(model ? { model } : {}),
+  })
+}
+
+export function getWorkflowRun(projectId, runId, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}`,
+    moduleId,
+  ))
+}
+
+export function getLatestWorkflowRun(projectId, moduleId = null) {
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/runs/latest`,
+    moduleId,
+  ))
+}
 export function getActiveArtifact(projectId, artifactType, moduleId = null) {
   return request(withModule(
     `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactType)}`,
@@ -202,4 +223,17 @@ export function uploadEvidence(
     method: 'POST',
     body,
   })
+}
+
+export function artifactDownloadUrl(
+  projectId,
+  artifactType,
+  format,
+  moduleId = null,
+) {
+  const path = withModule(
+    `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactType)}/download?format=${encodeURIComponent(format)}`,
+    moduleId,
+  )
+  return `${API_BASE_URL}${path}`
 }
