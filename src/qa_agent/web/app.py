@@ -760,6 +760,7 @@ def create_app(
         with _project_lock(request, project_id, module_id):
             manager = _context_manager(request, project_id, module_id)
             _, workflow = _load_project(manager, project_id)
+            _recover_missing_report_artifact(workflow, store, project_id)
             runner = request.app.state.runner_factory(workspace, store)
             result = WorkflowOrchestrator(
                 workflow,
@@ -868,11 +869,30 @@ def create_app(
                 )
             target = workflow.active_artifacts.get(target_type)
             if target is None:
+                if payload.approval_type is ApprovalType.REPORT_APPROVAL:
+                    raise ApiError(
+                        http_status=status.HTTP_409_CONFLICT,
+                        code="APPROVAL_TARGET_NOT_READY",
+                        message="测试报告尚未生成，请先重新生成报告",
+                    )
                 raise ApiError(
                     http_status=status.HTTP_404_NOT_FOUND,
                     code="ACTIVE_ARTIFACT_NOT_FOUND",
                     message="当前审批目标产物不存在",
                 )
+            try:
+                store.load_artifact(
+                    project_id,
+                    target.artifact_type,
+                    target.artifact_id,
+                    target.version,
+                )
+            except ArtifactStoreError as exc:
+                raise ApiError(
+                    http_status=status.HTTP_409_CONFLICT,
+                    code="APPROVAL_TARGET_NOT_READY",
+                    message="当前审批目标文件不存在，请先重新生成对应产物",
+                ) from exc
             now = datetime.now(timezone.utc)
             approval_id = f"approval-{uuid4().hex}"
             approval = HumanApproval(
@@ -1432,6 +1452,35 @@ async def _receive_upload(request: Request, upload: UploadFile) -> Path:
         raise
     return temporary_path
 
+
+def _recover_missing_report_artifact(
+    workflow: WorkflowRun,
+    store: ArtifactStore,
+    project_id: str,
+) -> None:
+    """Recover stale report-approval state when the report file was never saved."""
+    if workflow.current_state is not WorkflowState.WAITING_REPORT_APPROVAL:
+        return
+
+    pointer = workflow.active_artifacts.get("test_report")
+    if pointer is not None:
+        try:
+            store.load_artifact(
+                project_id,
+                pointer.artifact_type,
+                pointer.artifact_id,
+                pointer.version,
+            )
+            return
+        except ArtifactStoreError:
+            workflow.active_artifacts.pop("test_report", None)
+
+    WorkflowStateMachine(workflow).transition(
+        WorkflowState.GENERATING_REPORT,
+        triggered_by="web-api",
+        reason="测试报告审批目标产物缺失，恢复报告生成流程",
+    )
+    store.save_workflow(project_id, workflow)
 
 def _workflow_status(
     workflow: WorkflowRun,

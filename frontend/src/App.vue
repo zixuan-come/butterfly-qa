@@ -26,7 +26,6 @@ import {
   Moon,
   Paperclip,
   Pencil,
-  Play,
   Plus,
   RefreshCw,
   Search,
@@ -926,7 +925,7 @@ async function submitTestcaseApproval() {
 }
 
 async function submitReportApproval() {
-  if (!currentProject.value || workflow.value?.state !== 'waiting_report_approval') return
+  if (!currentProject.value || workflow.value?.state !== 'waiting_report_approval' || !reportData.value) return
   await submitApprovalAction('report_approval', 'approved')
 }
 
@@ -1723,13 +1722,12 @@ async function submitDelete() {
 
       <section v-else-if="activeStageId === 'execution'" class="stage-content vertical-workspace">
         <div class="execution-toolbar panel">
-          <div><div class="eyebrow">执行批次</div><h2>地址修改功能测试 · 第 1 轮</h2></div>
+          <div><div class="eyebrow">人工执行</div><h2>地址修改功能测试 · 第 1 轮</h2></div>
           <div class="environment-control">
             <label for="environment">测试环境</label>
             <select id="environment" v-model="executionEnvironment"><option>QA-02 · v2.8.14-rc3</option><option>QA-01 · v2.8.13</option></select>
             <label class="switch-control"><input v-model="environmentReady" type="checkbox" /><span></span>环境已确认</label>
           </div>
-          <button class="button primary" type="button" :disabled="!environmentReady" @click="showToast('测试批次已开始执行')"><Play :size="16" />开始执行</button>
         </div>
         <div class="metric-strip execution-metrics">
           <div><span>总用例</span><strong>{{ executionStats.total }}</strong><small>当前测试设计</small></div>
@@ -1789,7 +1787,7 @@ async function submitDelete() {
             <div class="approval-symbol" :class="{ approved: reportApproved }"><FileCheck2 :size="25" /></div>
             <div class="eyebrow">报告审批</div><h2>{{ reportApproved ? '报告已批准归档' : '等待测试负责人审批' }}</h2>
             <p>批准后锁定报告事实快照，后续变更将生成新的报告版本。</p>
-            <template v-if="workflow?.state === 'waiting_report_approval'">
+            <template v-if="workflow?.state === 'waiting_report_approval' && reportData">
               <label class="approval-check"><input type="checkbox" :checked="reportApproved" @change="approveReport" /><span><Check :size="14" /></span>我确认报告数据与发布建议</label>
               <div class="approval-actions">
                 <button class="button secondary" type="button" :disabled="approvalBusy" @click="openApprovalDialog('report_approval', 'changes_requested')"><RefreshCw :size="15" />要求修改</button>
@@ -1800,7 +1798,7 @@ async function submitDelete() {
                 </button>
               </div>
             </template>
-            <button v-else-if="workflow?.state === 'generating_report'" class="button primary full-width" type="button" :disabled="runningWorkflow" @click="continueWorkflow">
+            <button v-else-if="workflow?.state === 'generating_report' || (workflow?.state === 'waiting_report_approval' && !reportData)" class="button primary full-width" type="button" :disabled="runningWorkflow" @click="continueWorkflow">
               <LoaderCircle v-if="runningWorkflow" class="spin" :size="16" />
               <template v-else>重新生成报告<RefreshCw :size="16" /></template>
             </button>
