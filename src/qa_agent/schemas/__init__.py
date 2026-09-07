@@ -22,6 +22,7 @@ from .models import (
     TestDesign,
     TestPoint,
     TestReport,
+    TraceReference,
     TestStep,
 )
 
@@ -47,5 +48,6 @@ __all__ = [
     "TestDesign",
     "TestPoint",
     "TestReport",
+    "TraceReference",
     "TestStep",
 ]

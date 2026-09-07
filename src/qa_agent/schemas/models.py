@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ArtifactStatus(str, Enum):
@@ -278,6 +278,15 @@ class ExecutionBatch(BaseModel):
         return self
 
 
+class TraceReference(BaseModel):
+    """One explicit traceability row for strict structured model output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1)
+    refs: list[str] = Field(default_factory=list)
+
+
 class TestReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -292,4 +301,14 @@ class TestReport(BaseModel):
     defect_refs: list[str] = Field(default_factory=list)
     risk_summary: list[str] = Field(default_factory=list)
     conclusion: str = Field(min_length=1)
-    trace_refs: dict[str, list[str]] = Field(default_factory=dict)
+    trace_refs: list[TraceReference] = Field(default_factory=list)
+
+    @field_validator("trace_refs", mode="before")
+    @classmethod
+    def normalize_legacy_trace_refs(cls, value):
+        if isinstance(value, dict):
+            return [
+                {"source": source, "refs": refs}
+                for source, refs in value.items()
+            ]
+        return value

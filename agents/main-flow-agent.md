@@ -43,7 +43,25 @@
 | `waiting_testcase_approval` | 等待测试人员确认 | `waiting_manual_execution` 或 `waiting_case_revision` |
 | `waiting_manual_execution` | 接收人工执行结果和证据 | `generating_report` |
 | `generating_report` | 生成测试报告 | `waiting_report_approval` |
+
 | `waiting_report_approval` | 等待报告确认 | `completed` 或 `generating_report` |
+
+当当前状态为 `waiting_manual_execution` 且人工执行记录已提交时，必须返回如下报告动作：
+
+```json
+{
+  "action": "invoke_agent",
+  "target_role": "main_flow",
+  "skill_name": "test-report",
+  "target_state": "generating_report",
+  "reason": "根据人工执行结果、缺陷和证据生成测试报告",
+  "expected_output_type": "test_report"
+}
+```
+
+其中 `skill_name` 必须严格填写为 `test-report`，不能填写 `test_report`、`report` 或其他名称。
+
+
 
 表中的目标状态只是业务建议。实际转换必须经过 `WorkflowStateMachine` 校验，主流程 Agent 不得自行修改状态。
 

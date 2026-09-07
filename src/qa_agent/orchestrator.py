@@ -59,6 +59,9 @@ class WorkflowOrchestrator:
     _SKILL_ALIASES: dict[str, str] = {
         # Keep old prompts/workflow records compatible with the canonical directory name.
         "testcase-review": "testcase-evaluation",
+        "test_report": "test-report",
+        "test-reporting": "test-report",
+        "report": "test-report",
     }
 
     _ARTIFACT_MODELS: dict[str, type[BaseModel]] = {
@@ -101,6 +104,7 @@ class WorkflowOrchestrator:
             action = self._normalize_skill_name(action)
             action = self._normalize_processing_action(action)
             action = self._normalize_testcase_review_action(action)
+            action = self._normalize_report_action(action)
             self._validate_action_target(action)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return OrchestrationResult(
@@ -189,6 +193,14 @@ class WorkflowOrchestrator:
         """Parse a JSON action, accepting a Markdown JSON fence from the model."""
 
         payload = _parse_json_object(output_text)
+        # The report action is owned by main_flow and has one canonical Skill.
+        # Repair only this narrowly identifiable legacy action before validation.
+        if (
+            payload.get("action") == WorkflowActionType.INVOKE_AGENT.value
+            and payload.get("expected_output_type") == "test_report"
+            and not payload.get("skill_name")
+        ):
+            payload["skill_name"] = "test-report"
         return WorkflowAction.model_validate(payload)
 
     def _main_request(self) -> AgentRequest:
@@ -361,10 +373,25 @@ class WorkflowOrchestrator:
         if action.expected_output_type != "testcase_design":
             return action
         return action.model_copy(update={"expected_output_type": "test_design"})
+    @staticmethod
+    def _normalize_report_action(action: WorkflowAction) -> WorkflowAction:
+        """Keep report generation in generating_report until the report is accepted."""
+        if (
+            action.action is WorkflowActionType.INVOKE_AGENT
+            and action.expected_output_type == "test_report"
+            and action.target_state is not WorkflowState.GENERATING_REPORT
+        ):
+            return action.model_copy(update={"target_state": WorkflowState.GENERATING_REPORT})
+        return action
 
     @classmethod
     def _normalize_skill_name(cls, action: WorkflowAction) -> WorkflowAction:
         """Normalize legacy Skill names before the Harness resolves SKILL.md."""
+        if (
+            action.expected_output_type == "test_report"
+            and action.target_role is AgentRole.MAIN_FLOW
+        ):
+            return action.model_copy(update={"skill_name": "test-report"})
         skill_name = action.skill_name
         if not skill_name:
             return action

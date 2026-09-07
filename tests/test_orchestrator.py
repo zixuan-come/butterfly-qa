@@ -128,6 +128,52 @@ def test_legacy_testcase_review_skill_name_is_normalized():
 
     assert normalized.skill_name == "testcase-evaluation"
 
+def test_report_action_without_skill_name_is_repaired_before_validation():
+    action = WorkflowOrchestrator.parse_action(
+        json.dumps(
+            {
+                "action": "invoke_agent",
+                "target_role": "main_flow",
+                "target_state": "generating_report",
+                "reason": "生成测试报告",
+                "expected_output_type": "test_report",
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert action.skill_name == "test-report"
+
+
+@pytest.mark.parametrize("skill_name", ["test_report", "test-reporting", "report"])
+def test_legacy_report_skill_names_are_normalized(skill_name):
+    action = WorkflowAction(
+        action="invoke_agent",
+        target_role=AgentRole.MAIN_FLOW,
+        skill_name=skill_name,
+        target_state=WorkflowState.GENERATING_REPORT,
+        reason="生成测试报告",
+        expected_output_type="test_report",
+    )
+
+    normalized = WorkflowOrchestrator._normalize_skill_name(action)
+
+    assert normalized.skill_name == "test-report"
+
+def test_report_invoke_action_stays_in_generation_until_artifact_is_accepted():
+    action = WorkflowAction(
+        action="invoke_agent",
+        target_role=AgentRole.MAIN_FLOW,
+        skill_name="test-report",
+        target_state=WorkflowState.WAITING_REPORT_APPROVAL,
+        reason="鐢熸垚娴嬭瘯鎶ュ憡",
+        expected_output_type="test_report",
+    )
+
+    normalized = WorkflowOrchestrator._normalize_report_action(action)
+
+    assert normalized.target_state is WorkflowState.GENERATING_REPORT
+
 def test_orchestrator_invokes_specialist_and_persists_artifact(tmp_path):
     runner = QueueRunner([action_payload(), review_payload()])
     workflow = make_workflow()

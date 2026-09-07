@@ -68,9 +68,12 @@ description: 根据已确认用例的执行记录、缺陷、阻塞项和测试�
   "defect_refs": ["BUG-001"],
   "risk_summary": ["支付依赖不可用导致一条用例阻塞"],
   "conclusion": "本轮测试存在一个高优先级失败和一个阻塞项，需处理后再评估发布风险",
-  "trace_refs": {
-    "REQ-001": ["TP-001", "TC-001", "record-001"]
-  }
+  "trace_refs": [
+    {
+      "source": "REQ-001",
+      "refs": ["TP-001", "TC-001", "record-001"]
+    }
+  ]
 }
 ```
 

@@ -144,7 +144,9 @@ class TestReportService:
                 "report defect_refs do not match execution records"
             )
         trace_values = {
-            ref for refs in report.trace_refs.values() for ref in refs
+            ref
+            for row in report.trace_refs
+            for ref in row.refs
         }
         missing_records = {
             record.record_id for record in execution.records
@@ -205,8 +207,8 @@ class TestReportService:
             ]
         )
         lines.extend(
-            f"| {_escape(key)} | {_escape(', '.join(refs))} |"
-            for key, refs in sorted(report.trace_refs.items())
+            f'| {_escape(row.source)} | {_escape(", ".join(row.refs))} |'
+            for row in sorted(report.trace_refs, key=lambda item: item.source)
         )
         return "\n".join(lines).rstrip() + "\n"
 
