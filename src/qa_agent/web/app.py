@@ -40,6 +40,7 @@ from ..project import (
     ProjectManager,
     ProjectRecord,
 )
+from ..execution_xlsx import ExecutionXlsxError, parse_execution_xlsx
 from ..schemas import (
     ApprovalType,
     ArtifactMeta,
@@ -48,6 +49,7 @@ from ..schemas import (
     HumanApproval,
     ProductConfirmationChecklist,
     RequirementReview,
+    TestDesign,
 )
 from ..storage import ArtifactStore, ArtifactStoreError
 from ..test_design_rendering import render_test_design
@@ -980,6 +982,99 @@ def create_app(
                 )
             except HumanActionError as exc:
                 raise _human_action_error(exc) from exc
+        relative_path = _project_relative_path(path, store.project_root(project_id))
+        if relative_path is None:
+            raise RuntimeError("execution artifact escaped project root")
+        return _success(
+            request,
+            ExecutionData(
+                execution_id=execution_id,
+                artifact_path=relative_path,
+                state=workflow.current_state.value,
+                transition=transition.model_dump(mode="json"),
+            ),
+            message="测试执行结果已提交",
+        )
+
+    @app.post(
+        f"{API_PREFIX}/projects/{{project_id}}/executions/upload",
+        response_model=ApiResponse[ExecutionData],
+        status_code=status.HTTP_201_CREATED,
+        tags=["human-actions"],
+    )
+    async def upload_execution(
+        project_id: str,
+        request: Request,
+        file: Annotated[UploadFile, File()],
+        submitted_by: Annotated[str, Form(min_length=1, max_length=120)],
+        module_id: str | None = None,
+    ) -> ApiResponse[ExecutionData]:
+        store = _artifact_store(request, module_id)
+        temporary_path = await _receive_upload(request, file)
+        try:
+            workbook_bytes = temporary_path.read_bytes()
+        finally:
+            temporary_path.unlink(missing_ok=True)
+            await file.close()
+        with _project_lock(request, project_id, module_id):
+            manager = _context_manager(request, project_id, module_id)
+            _, workflow = _load_project(manager, project_id)
+            design_pointer = workflow.active_artifacts.get("test_design")
+            if design_pointer is None:
+                raise ApiError(
+                    http_status=status.HTTP_404_NOT_FOUND,
+                    code="ACTIVE_ARTIFACT_NOT_FOUND",
+                    message="当前测试设计产物不存在",
+                )
+            design = TestDesign.model_validate(
+                store.load_artifact(
+                    project_id,
+                    "test_design",
+                    design_pointer.artifact_id,
+                    design_pointer.version,
+                )
+            )
+            now = datetime.now(timezone.utc)
+            try:
+                records = parse_execution_xlsx(
+                    workbook_bytes,
+                    test_design=design,
+                    submitted_by=submitted_by,
+                    uploaded_at=now,
+                )
+            except ExecutionXlsxError as exc:
+                raise ApiError(
+                    http_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    code="EXECUTION_XLSX_REJECTED",
+                    message=str(exc),
+                    data={"issues": exc.issues},
+                ) from exc
+            execution_id = f"execution-{uuid4().hex}"
+            execution = ExecutionBatch(
+                meta=ArtifactMeta(
+                    artifact_id=execution_id,
+                    artifact_type="test_execution",
+                    project_id=project_id,
+                    version=1,
+                    status=ArtifactStatus.COMPLETED,
+                    source_artifacts=[design_pointer.artifact_id],
+                    created_by=submitted_by,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                test_design_id=design_pointer.artifact_id,
+                test_design_version=design_pointer.version,
+                records=records,
+            )
+            try:
+                path, transition = ManualExecutionService(workflow, store).submit(
+                    execution
+                )
+            except HumanActionError as exc:
+                raise _human_action_error(exc) from exc
+            # Keep the exact sheet the tester submitted beside the normalized batch,
+            # so the report reads the JSON while the original stays downloadable.
+            path.parent.joinpath("execution.xlsx").write_bytes(workbook_bytes)
         relative_path = _project_relative_path(path, store.project_root(project_id))
         if relative_path is None:
             raise RuntimeError("execution artifact escaped project root")

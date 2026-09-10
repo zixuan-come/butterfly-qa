@@ -24,11 +24,9 @@ import {
   MapPin,
   Menu,
   Moon,
-  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
-  Search,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -58,10 +56,9 @@ import {
   getWorkflowRun,
   startWorkflowRun,
   submitApproval,
-  submitExecution,
+  uploadExecution,
   updateFeatureModule,
   updateProject,
-  uploadEvidence,
   uploadProjectInput,
 } from './api'
 
@@ -150,18 +147,15 @@ const selectedFindingId = ref('F-001')
 const auditOpen = ref(false)
 const sidebarOpen = ref(false)
 const executionCases = ref([])
-const environmentReady = ref(false)
-const executionEnvironment = ref('QA-02 · v2.8.14-rc3')
+const executionIssues = ref([])
+const executionFileInput = ref(null)
 const reportApproved = ref(false)
 const reviewApproved = ref(false)
 const approvalBusy = ref(false)
 const executionBusy = ref(false)
-const evidenceBusy = ref(false)
 const confirmationChecklistBusy = ref(false)
 const confirmationChecklistMarkdown = ref('')
 const confirmationChecklistOpen = ref(false)
-const evidenceFileInput = ref(null)
-const evidenceTarget = ref(null)
 const toast = ref('')
 const projects = ref([])
 const currentProject = ref(null)
@@ -413,10 +407,8 @@ const auditEvents = computed(() => [...(workflow.value?.transition_history || []
     action: `${stateLabels[event.from_state] || event.from_state} → ${stateLabels[event.to_state] || event.to_state}`,
     detail: event.reason,
   })))
-const canSubmitExecution = computed(() => (
+const isAwaitingExecution = computed(() => (
   workflow.value?.state === 'waiting_manual_execution'
-  && executionCases.value.length > 0
-  && executionCases.value.every((item) => item.result !== '未执行' && item.actualResult.trim())
 ))
 const filteredFindings = computed(() => {
   if (findingFilter.value === '全部') return findings.value
@@ -427,19 +419,9 @@ const findingCounts = computed(() => ({
   高: findings.value.filter((item) => item.severity === '高').length,
   中: findings.value.filter((item) => item.severity === '中').length,
 }))
-const executionStats = computed(() => {
-  const total = executionCases.value.length
-  const count = (result) => executionCases.value.filter((item) => item.result === result).length
-  const passed = count('通过')
-  return {
-    total,
-    passed,
-    failed: count('失败'),
-    blocked: count('阻塞'),
-    pending: count('未执行'),
-    rate: total ? Math.round((passed / total) * 100) : 0,
-  }
-})
+const executionStats = computed(() => ({
+  total: executionCases.value.length,
+}))
 
 watch(theme, (value) => {
   document.documentElement.dataset.theme = value
@@ -726,20 +708,12 @@ function resetArtifacts() {
 }
 
 function hydrateExecutionCases() {
-  const previous = new Map(executionCases.value.map((item) => [item.id, item]))
-  executionCases.value = (artifacts.test_design?.test_cases || []).map((item) => {
-    const existing = previous.get(item.case_id)
-    return {
-      id: item.case_id,
-      version: item.version,
-      title: item.title,
-      priority: item.priority,
-      result: existing?.result || '未执行',
-      executor: existing?.executor || newProject.created_by,
-      evidence: existing?.evidence || [],
-      actualResult: existing?.actualResult || '',
-    }
-  })
+  executionCases.value = (artifacts.test_design?.test_cases || []).map((item) => ({
+    id: item.case_id,
+    version: item.version,
+    title: item.title,
+    priority: item.priority,
+  }))
 }
 
 function openCreateProject() {
@@ -995,59 +969,47 @@ async function submitApprovalAction(approvalType, decision, comment = '') {
   }
 }
 
-function chooseEvidenceFile(item) {
-  evidenceTarget.value = item
-  evidenceFileInput.value?.click()
+function downloadExecutionTemplate() {
+  if (!currentProject.value || !artifacts.test_design) {
+    showToast('当前没有可下载的测试用例模板')
+    return
+  }
+  const link = document.createElement('a')
+  link.href = artifactDownloadUrl(
+    currentProject.value.project_id,
+    'test_design',
+    'xlsx',
+    currentModule.value?.module_id || null,
+  )
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
-async function handleEvidenceFile(event) {
+function chooseExecutionFile() {
+  if (!isAwaitingExecution.value) return
+  executionFileInput.value?.click()
+}
+
+async function handleExecutionFile(event) {
   const file = event.target.files?.[0]
-  const target = evidenceTarget.value
-  if (!file || !target || !currentProject.value) return
-  evidenceBusy.value = true
+  if (!file || !currentProject.value) return
+  executionBusy.value = true
+  executionIssues.value = []
   try {
-    const evidence = await uploadEvidence(currentProject.value.project_id, file, {
-      evidenceType: inferEvidenceType(file),
-      description: `${target.id} 执行证据：${file.name}`,
+    await uploadExecution(currentProject.value.project_id, file, {
+      submittedBy: currentProject.value.created_by,
       moduleId: currentModule.value?.module_id,
     })
-    target.evidence.push(evidence)
-    showToast(`${target.id} 已上传证据`)
-  } catch (error) {
-    showToast(error.message)
-  } finally {
-    evidenceBusy.value = false
-    evidenceTarget.value = null
-    event.target.value = ''
-  }
-}
-
-async function submitExecutionResults() {
-  if (!canSubmitExecution.value || !currentProject.value) return
-  executionBusy.value = true
-  try {
-    await submitExecution(currentProject.value.project_id, {
-      submitted_by: newProject.created_by,
-      records: executionCases.value.map((item) => ({
-        record_id: `record-${item.id}-v${item.version}`,
-        case_id: item.id,
-        case_version: item.version,
-        environment: executionEnvironment.value,
-        executed_by: item.executor,
-        executed_at: new Date().toISOString(),
-        result: { 通过: 'passed', 失败: 'failed', 阻塞: 'blocked' }[item.result],
-        actual_result: item.actualResult,
-        defect_refs: [],
-        evidence: item.evidence,
-        notes: [],
-      })),
-    }, currentModule.value?.module_id)
     await refreshCurrentProject()
     showToast('执行结果已提交，正在等待生成测试报告')
   } catch (error) {
+    executionIssues.value = error.data?.issues || []
     showToast(error.message)
   } finally {
     executionBusy.value = false
+    event.target.value = ''
   }
 }
 
@@ -1064,14 +1026,6 @@ function selectFinding(id) {
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
   }
-}
-
-function updateExecutionResult(item, result) {
-  item.result = result
-  if (item.executor === '待分配') item.executor = 'admin'
-  if (result === '通过' && !item.actualResult) item.actualResult = '结果符合预期'
-  if (result !== '通过' && item.actualResult === '结果符合预期') item.actualResult = ''
-  showToast(`${item.id} 已标记为${result}`)
 }
 
 function approveReview() {
@@ -1109,12 +1063,6 @@ function formatDateTime(value) {
   }).format(new Date(value))
 }
 
-function inferEvidenceType(file) {
-  if (file.type.startsWith('image/')) return 'screenshot'
-  if (file.type.startsWith('video/')) return 'video'
-  if (file.name.toLowerCase().endsWith('.log')) return 'log'
-  return 'file'
-}
 function openEditProject(project) {
   projectMenuOpen.value = false
   manageDialog.open = true
@@ -1722,45 +1670,37 @@ async function submitDelete() {
 
       <section v-else-if="activeStageId === 'execution'" class="stage-content vertical-workspace">
         <div class="execution-toolbar panel">
-          <div><div class="eyebrow">人工执行</div><h2>地址修改功能测试 · 第 1 轮</h2></div>
-          <div class="environment-control">
-            <label for="environment">测试环境</label>
-            <select id="environment" v-model="executionEnvironment"><option>QA-02 · v2.8.14-rc3</option><option>QA-01 · v2.8.13</option></select>
-            <label class="switch-control"><input v-model="environmentReady" type="checkbox" /><span></span>环境已确认</label>
-          </div>
+          <div><div class="eyebrow">人工执行</div><h2>线下执行测试用例</h2></div>
+          <span :class="isAwaitingExecution ? 'gate-blocked' : 'verified-chip'">{{ isAwaitingExecution ? '等待上传执行结果' : '当前阶段无需上传' }}</span>
         </div>
-        <div class="metric-strip execution-metrics">
-          <div><span>总用例</span><strong>{{ executionStats.total }}</strong><small>当前测试设计</small></div>
-          <div><span>通过</span><strong class="success-text">{{ executionStats.passed }}</strong><small>通过率 {{ executionStats.rate }}%</small></div>
-          <div><span>失败</span><strong class="danger-text">{{ executionStats.failed }}</strong><small>需要缺陷单</small></div>
-          <div><span>阻塞 / 未执行</span><strong class="warning-text">{{ executionStats.blocked + executionStats.pending }}</strong><small>等待环境与执行</small></div>
+        <ol class="execution-flow panel">
+          <li>
+            <div class="execution-flow-head"><span class="step-node">1</span><div><strong>下载执行模板</strong><small>获取包含全部用例的 Excel，测试人员线下逐条执行</small></div></div>
+            <button class="button secondary small" type="button" :disabled="!artifacts.test_design" @click="downloadExecutionTemplate"><Download :size="14" />下载 Excel 模板</button>
+          </li>
+          <li>
+            <div class="execution-flow-head"><span class="step-node">2</span><div><strong>线下填写执行结果</strong><small>在“测试用例”页签填写执行结果、实际结果等字段，无需在页面逐条勾选</small></div></div>
+            <p class="execution-hint">当前测试设计共 <strong>{{ executionStats.total }}</strong> 条用例，需全部填写后再上传。</p>
+          </li>
+          <li>
+            <div class="execution-flow-head"><span class="step-node">3</span><div><strong>上传执行结果</strong><small>上传填写完成的 Excel，系统会校验完整性并进入报告生成</small></div></div>
+            <button class="button primary small" type="button" :disabled="!isAwaitingExecution || executionBusy" @click="chooseExecutionFile">
+              <LoaderCircle v-if="executionBusy" class="spin" :size="15" />
+              <template v-else><Upload :size="15" />上传执行结果 Excel</template>
+            </button>
+            <input ref="executionFileInput" class="visually-hidden" type="file" accept=".xlsx" @change="handleExecutionFile" />
+          </li>
+        </ol>
+        <div v-if="executionIssues.length" class="panel execution-issues">
+          <div class="panel-header compact"><div><div class="eyebrow">校验未通过</div><h2>请按行号和列名修正后重新上传</h2></div><span class="gate-blocked">{{ executionIssues.length }} 项</span></div>
+          <ul class="issue-list">
+            <li v-for="(issue, index) in executionIssues" :key="index">
+              <span class="issue-loc">{{ issue.row ? `第 ${issue.row} 行` : '整体' }} · {{ issue.column }}</span>
+              <span class="issue-message">{{ issue.message }}</span>
+            </li>
+          </ul>
         </div>
-        <div class="panel table-panel">
-          <div class="panel-header compact">
-            <div><div class="eyebrow">执行工作台</div><h2>测试用例与证据</h2></div>
-            <div class="execution-actions">
-              <div class="search-box"><Search :size="15" /><input aria-label="搜索用例" placeholder="搜索用例 ID 或标题" /></div>
-              <button class="button primary small" type="button" :disabled="!canSubmitExecution || executionBusy" @click="submitExecutionResults">
-                <LoaderCircle v-if="executionBusy" class="spin" :size="15" />
-                <template v-else>提交执行结果<ArrowRight :size="15" /></template>
-              </button>
-            </div>
-          </div>
-          <div class="table-scroll">
-            <table class="execution-table">
-              <thead><tr><th>用例</th><th>优先级</th><th>执行人</th><th>证据</th><th>执行结果</th></tr></thead>
-              <tbody>
-                <tr v-for="item in executionCases" :key="item.id">
-                  <td><b>{{ item.id }}</b><small>{{ item.title }}</small><input v-model.trim="item.actualResult" class="actual-result-input" :aria-label="`${item.id} 实际结果`" placeholder="填写实际结果" /></td><td><span class="priority-badge">{{ item.priority }}</span></td><td>{{ item.executor }}</td>
-                  <td><button class="text-button" type="button" :disabled="evidenceBusy" @click="chooseEvidenceFile(item)"><Paperclip :size="14" />{{ item.evidence.length ? `${item.evidence.length} 份` : '上传' }}</button></td>
-                  <td><div class="result-control"><button v-for="result in ['通过', '失败', '阻塞']" :key="result" type="button" :class="[result, { active: item.result === result }]" :title="`标记为${result}`" @click="updateExecutionResult(item, result)"><Check v-if="result === '通过'" :size="14" /><XCircle v-else-if="result === '失败'" :size="14" /><Clock3 v-else :size="14" /><span>{{ result }}</span></button></div></td>
-                </tr>
-              </tbody>
-            </table>
-            <div v-if="!executionCases.length" class="artifact-empty"><strong>等待测试设计产物进入执行阶段</strong></div>
-          </div>
-          <input ref="evidenceFileInput" class="visually-hidden" type="file" @change="handleEvidenceFile" />
-        </div>
+        <div v-if="!artifacts.test_design" class="artifact-empty"><strong>等待测试设计产物进入执行阶段</strong></div>
       </section>
 
       <section v-else class="stage-content vertical-workspace">

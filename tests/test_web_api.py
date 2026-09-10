@@ -1182,7 +1182,7 @@ def test_test_design_downloads_current_xlsx(tmp_path):
         )
         response = client.get(
             "/api/v1/projects/demo/artifacts/test_design/download",
-            params={"format": "csv"},
+            params={"format": "xlsx"},
         )
 
     assert response.status_code == 200
@@ -1206,3 +1206,196 @@ def test_test_design_downloads_current_xlsx(tmp_path):
         / "design-001"
         / "v1.xlsx"
     ).is_file()
+
+
+def _fill_execution_template(design_xlsx: bytes, results: dict[str, str]) -> bytes:
+    """Round-trip the real template: rewrite the 测试用例 sheet with results.
+
+    ``results`` maps case_id -> 执行结果; every case is given a non-empty
+    实际结果 so the workbook is a complete submission.
+    """
+
+    from xml.etree import ElementTree as ET
+
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    with ZipFile(BytesIO(design_xlsx)) as archive:
+        names = archive.namelist()
+        contents = {name: archive.read(name) for name in names}
+
+    # sheet1.xml is 测试用例; parse its header to find execution columns.
+    root = ET.fromstring(contents["xl/worksheets/sheet1.xml"])
+    sheet_data = root.find(f"{{{main}}}sheetData")
+    rows = sheet_data.findall(f"{{{main}}}row")
+    header_cells = [
+        "".join(cell.itertext()).strip()
+        for cell in rows[0].findall(f"{{{main}}}c")
+    ]
+    column_of = {name: index for index, name in enumerate(header_cells)}
+
+    def _column_letter(index: int) -> str:
+        name = ""
+        index += 1
+        while index:
+            index, remainder = divmod(index - 1, 26)
+            name = chr(65 + remainder) + name
+        return name
+
+    for row in rows[1:]:
+        row_number = row.attrib["r"]
+        cells = row.findall(f"{{{main}}}c")
+        case_id = "".join(cells[column_of["用例 ID"]].itertext()).strip()
+        if case_id not in results:
+            continue
+        updates = {
+            "执行结果": results[case_id],
+            "实际结果": f"{case_id} 实际结果",
+            "执行人": "tester-001",
+            "执行环境": "SIT",
+        }
+        for column_name, value in updates.items():
+            cell = cells[column_of[column_name]]
+            reference = f"{_column_letter(column_of[column_name])}{row_number}"
+            cell.attrib.clear()
+            cell.set("r", reference)
+            cell.set("t", "inlineStr")
+            for child in list(cell):
+                cell.remove(child)
+            is_node = ET.SubElement(cell, f"{{{main}}}is")
+            text_node = ET.SubElement(is_node, f"{{{main}}}t")
+            text_node.text = value
+
+    ET.register_namespace("", main)
+    contents["xl/worksheets/sheet1.xml"] = ET.tostring(root, encoding="utf-8")
+
+    stream = BytesIO()
+    with ZipFile(stream, "w") as archive:
+        for name, payload in contents.items():
+            archive.writestr(name, payload)
+    return stream.getvalue()
+
+
+def _download_template(client: TestClient) -> bytes:
+    response = client.get(
+        "/api/v1/projects/demo/artifacts/test_design/download",
+        params={"format": "xlsx"},
+    )
+    assert response.status_code == 200
+    return response.content
+
+
+def test_execution_upload_advances_workflow_and_keeps_raw_excel(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        template = _download_template(client)
+        filled = _fill_execution_template(template, {"TC-001": "通过"})
+        response = client.post(
+            "/api/v1/projects/demo/executions/upload",
+            data={"submitted_by": "tester-001"},
+            files={
+                "file": (
+                    "execution.xlsx",
+                    filled,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()["data"]
+    assert body["state"] == "generating_report"
+    assert body["artifact_path"].endswith("v1.json")
+
+    execution_id = body["execution_id"]
+    raw = (
+        tmp_path
+        / "projects"
+        / "demo"
+        / "artifacts"
+        / "test_execution"
+        / execution_id
+        / "execution.xlsx"
+    )
+    assert raw.is_file()
+    assert raw.read_bytes() == filled
+
+
+def test_execution_upload_reports_issues_for_incomplete_workbook(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        # Two cases in the design, but only one result filled in.
+        store = _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        manager = ProjectManager(store.projects_root)
+        workflow = manager.load_workflow("demo")
+        design = DesignModel.model_validate(
+            store.load_artifact("demo", "test_design", "design-001", 1)
+        )
+        design.test_cases.append(
+            CaseModel(
+                case_id="TC-002",
+                requirement_refs=["REQ-001"],
+                test_point_refs=["TP-001"],
+                title="第二条",
+                priority="P1",
+                steps=[StepModel(step_no=1, action="操作", expected_result="通过")],
+            )
+        )
+        design.meta.version = 2
+        store.save_artifact(design)
+        workflow.active_artifacts["test_design"] = ArtifactPointer(
+            artifact_id="design-001", artifact_type="test_design", version=2
+        )
+        store.save_workflow("demo", workflow)
+
+        template = _download_template(client)
+        filled = _fill_execution_template(template, {"TC-001": "通过"})
+        response = client.post(
+            "/api/v1/projects/demo/executions/upload",
+            data={"submitted_by": "tester-001"},
+            files={"file": ("execution.xlsx", filled, "application/octet-stream")},
+        )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "EXECUTION_XLSX_REJECTED"
+    issues = payload["data"]["issues"]
+    # The template pre-fills every case's ID, so TC-002's row is present but its
+    # 执行结果 is left blank -> it is rejected as an incomplete row, not swept up
+    # as a missing case.
+    assert any(
+        issue["column"] == "执行结果" and "必须填写" in issue["message"]
+        for issue in issues
+    )
+
+    # A rejected upload must not advance the workflow.
+    status_response = None
+    with _client(tmp_path) as client:
+        status_response = client.get("/api/v1/projects/demo/workflow")
+    assert status_response.json()["data"]["state"] == "waiting_manual_execution"
+
+
+def test_execution_upload_rejects_non_xlsx(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        response = client.post(
+            "/api/v1/projects/demo/executions/upload",
+            data={"submitted_by": "tester-001"},
+            files={"file": ("execution.xlsx", b"not-a-zip", "application/octet-stream")},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "EXECUTION_XLSX_REJECTED"
+
+
+def test_json_execution_endpoint_still_accepts_records(tmp_path):
+    with _client(tmp_path) as client:
+        _create_project(client)
+        _seed_test_design(tmp_path, WorkflowState.WAITING_MANUAL_EXECUTION)
+        response = client.post(
+            "/api/v1/projects/demo/executions",
+            json=_execution_payload(),
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["state"] == "generating_report"

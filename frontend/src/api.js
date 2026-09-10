@@ -206,6 +206,19 @@ export function submitExecution(projectId, payload, moduleId = null) {
   })
 }
 
+export function uploadExecution(projectId, file, { submittedBy, moduleId } = {}) {
+  const body = new FormData()
+  body.append('file', file)
+  body.append('submitted_by', submittedBy)
+  return request(withModule(
+    `/projects/${encodeURIComponent(projectId)}/executions/upload`,
+    moduleId,
+  ), {
+    method: 'POST',
+    body,
+  })
+}
+
 export function uploadEvidence(
   projectId,
   file,

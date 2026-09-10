@@ -256,6 +256,7 @@ class ExecutionRecord(BaseModel):
     result: ExecutionResult
     actual_result: str = Field(min_length=1)
     defect_refs: list[str] = Field(default_factory=list)
+    evidence_notes: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

@@ -28,17 +28,21 @@ def render_test_design_xlsx(test_design: Any) -> bytes:
         {
             "name": "测试用例",
             "columns": [
-                ("用例 ID", 16), ("用例标题", 36), ("优先级", 12),
+                ("用例 ID", 16), ("用例版本", 12), ("用例标题", 36), ("优先级", 12),
                 ("关联需求", 20), ("关联测试点", 20), ("前置条件", 34),
                 ("测试数据", 34), ("步骤数", 10), ("结构状态", 14),
+                ("执行结果", 14), ("实际结果", 36), ("缺陷 ID", 24),
+                ("证据说明", 34), ("执行环境", 24), ("执行人", 16),
+                ("执行时间", 22), ("执行备注", 34),
             ],
             "rows": [
                 [
-                    case.get("case_id", ""), case.get("title", ""),
+                    case.get("case_id", ""), case.get("version", 1), case.get("title", ""),
                     case.get("priority", ""), _join(case.get("requirement_refs")),
                     _join(case.get("test_point_refs")), _join(case.get("preconditions")),
                     _join(case.get("test_data")), len(case.get("steps") or []),
                     "结构完整" if case.get("steps") else "结构不完整",
+                    "", "", "", "", "", "", "", "",
                 ]
                 for case in cases
             ],
@@ -72,6 +76,18 @@ def render_test_design_xlsx(test_design: Any) -> bytes:
                     point.get("description", ""),
                 ]
                 for point in points
+            ],
+        },
+        {
+            "name": "执行说明",
+            "columns": [("字段", 22), ("说明", 80)],
+            "rows": [
+                ["测试设计 ID", (data.get("meta") or {}).get("artifact_id", "")],
+                ["测试设计版本", (data.get("meta") or {}).get("version", 1)],
+                ["执行方式", "请在线下执行测试用例，在测试用例页签填写执行字段后上传本文件"],
+                ["执行结果", "通过、失败、阻塞、跳过"],
+                ["必填字段", "执行结果、实际结果；执行人、执行环境和执行时间可留空并使用上传信息补全"],
+                ["证据说明", "填写截图、日志、录屏、缺陷附件的文件名、路径或链接；仅作为执行记录保存"],
             ],
         },
     ]
