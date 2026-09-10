@@ -184,6 +184,62 @@ class ProjectManager:
     def load_project(self, project_id: str) -> ProjectRecord:
         return self._load_record(project_id)
 
+    def current_requirement_sha256(self, project_id: str) -> str | None:
+        """Return the SHA256 of the project's active requirement input, if any."""
+
+        project = self._load_record(project_id)
+        workflow = WorkflowRun.model_validate(self.store.load_workflow(project_id))
+        current_id = workflow.current_requirement_input_id
+        if not current_id:
+            return None
+        for item in project.inputs:
+            if item.input_id == current_id:
+                return item.sha256
+        return None
+
+    def import_requirement_version(
+        self,
+        project_id: str,
+        source_path: str | Path,
+        *,
+        imported_by: str,
+        input_id: str | None = None,
+        original_name: str | None = None,
+        imported_at: datetime | None = None,
+    ) -> tuple[ProjectInput | None, bool]:
+        """Import a requirement file only when its content actually changed.
+
+        Compares the incoming file's SHA256 against the project's active
+        requirement version. Returns ``(imported, changed)``: when the digest
+        matches the current requirement, nothing is written and the existing
+        ``ProjectInput`` is returned with ``changed=False``; otherwise the new
+        version is imported and returned with ``changed=True``.
+        """
+
+        source = Path(source_path).resolve(strict=True)
+        if not source.is_file():
+            raise ArtifactStoreError(f"input source is not a file: {source}")
+
+        incoming_digest = self._digest_file(source)
+        project = self._load_record(project_id)
+        workflow = WorkflowRun.model_validate(self.store.load_workflow(project_id))
+        current_id = workflow.current_requirement_input_id
+        if current_id:
+            for item in project.inputs:
+                if item.input_id == current_id and item.sha256 == incoming_digest:
+                    return item, False
+
+        imported = self.import_input(
+            project_id,
+            source,
+            InputCategory.REQUIREMENT,
+            imported_by=imported_by,
+            input_id=input_id,
+            original_name=original_name,
+            imported_at=imported_at,
+        )
+        return imported, True
+
     def load_workflow(self, project_id: str) -> WorkflowRun:
         return WorkflowRun.model_validate(self.store.load_workflow(project_id))
 
@@ -203,6 +259,14 @@ class ProjectManager:
 
     def _save_record(self, project_id: str, project: ProjectRecord) -> None:
         self.store.save_project(project_id, project)
+
+    @staticmethod
+    def _digest_file(source: Path) -> str:
+        digest = hashlib.sha256()
+        with source.open("rb") as reader:
+            while chunk := reader.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _copy_immutable(source: Path, target: Path) -> tuple[str, int]:

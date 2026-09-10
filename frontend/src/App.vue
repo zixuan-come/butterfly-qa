@@ -785,17 +785,21 @@ async function handleRequirementFile(event) {
   const isRevision = workflow.value?.state === 'waiting_product_revision'
   uploadingRequirement.value = true
   try {
-    await uploadProjectInput(currentProject.value.project_id, file, {
+    const result = await uploadProjectInput(currentProject.value.project_id, file, {
       category: 'requirement',
       importedBy: newProject.created_by,
       moduleId: currentModule.value?.module_id,
     })
     await refreshCurrentProject()
-    showToast(
-      isRevision
-        ? `已导入修订版 ${file.name}，可继续流程重新评审`
-        : `已导入 ${file.name}`,
-    )
+    if (result?.changed === false) {
+      showToast(`需求内容未变化，未创建新版本（${file.name}）`)
+    } else {
+      showToast(
+        isRevision
+          ? `已导入修订版 ${file.name}，可继续流程重新评审`
+          : `已导入 ${file.name}`,
+      )
+    }
   } catch (error) {
     showToast(error.message)
   } finally {
@@ -1402,7 +1406,7 @@ async function submitDelete() {
                 <LoaderCircle v-if="uploadingRequirement" class="spin" :size="14" />
                 <Upload v-else :size="14" />{{ workflow?.state === 'waiting_product_revision' ? '上传修订版' : '导入需求' }}
               </button>
-              <button class="text-button" type="button" @click="refreshCurrentProject"><RefreshCw :size="14" />检查更新</button>
+              <button class="text-button" type="button" @click="refreshCurrentProject"><RefreshCw :size="14" />刷新状态</button>
             </div>
             <input
               ref="requirementFileInput"

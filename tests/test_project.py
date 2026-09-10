@@ -101,6 +101,62 @@ def test_import_input_rejects_unsafe_id_before_copying(tmp_path):
         )
 
     assert not (tmp_path / "projects" / "demo" / "outside.md").exists()
+
+
+def test_import_requirement_version_skips_unchanged_content(tmp_path):
+    source = tmp_path / "需求.md"
+    source.write_text("# 需求\n\n初版内容。\n", encoding="utf-8")
+    manager = ProjectManager(tmp_path / "projects")
+    manager.create_project("demo", "演示项目", created_by="tester-001")
+
+    first, changed_first = manager.import_requirement_version(
+        "demo", source, imported_by="tester-001", input_id="requirement-001"
+    )
+    assert changed_first is True
+    assert first is not None
+
+    # Re-uploading the identical file must not create a new version.
+    resend = tmp_path / "需求-again.md"
+    resend.write_text("# 需求\n\n初版内容。\n", encoding="utf-8")
+    same, changed_same = manager.import_requirement_version(
+        "demo", resend, imported_by="tester-001"
+    )
+    assert changed_same is False
+    assert same is not None
+    assert same.input_id == first.input_id
+    # Only one requirement input persisted.
+    assert len(manager.load_project("demo").inputs) == 1
+
+
+def test_import_requirement_version_saves_new_version_when_changed(tmp_path):
+    source = tmp_path / "需求.md"
+    source.write_text("# 需求\n\n初版内容。\n", encoding="utf-8")
+    manager = ProjectManager(tmp_path / "projects")
+    manager.create_project("demo", "演示项目", created_by="tester-001")
+
+    first, _ = manager.import_requirement_version(
+        "demo", source, imported_by="tester-001", input_id="requirement-001"
+    )
+
+    revised = tmp_path / "需求-v2.md"
+    revised.write_text("# 需求\n\n修订后的内容。\n", encoding="utf-8")
+    second, changed = manager.import_requirement_version(
+        "demo", revised, imported_by="tester-001", input_id="requirement-002"
+    )
+
+    assert changed is True
+    assert second is not None
+    assert second.input_id != first.input_id
+    assert manager.current_requirement_sha256("demo") == second.sha256
+    assert len(manager.load_project("demo").inputs) == 2
+
+
+def test_current_requirement_sha256_none_before_import(tmp_path):
+    manager = ProjectManager(tmp_path / "projects")
+    manager.create_project("demo", "演示项目", created_by="tester-001")
+    assert manager.current_requirement_sha256("demo") is None
+
+
 def test_create_feature_modules_initializes_independent_workflows(tmp_path):
     projects_root = tmp_path / "projects"
     project_manager = ProjectManager(projects_root)

@@ -550,14 +550,24 @@ def create_app(
         _load_project(manager, project_id)
         temporary_path = await _receive_upload(request, file)
         try:
-            imported = manager.import_input(
-                project_id,
-                temporary_path,
-                category,
-                imported_by=imported_by,
-                input_id=input_id,
-                original_name=file.filename,
-            )
+            if category == InputCategory.REQUIREMENT:
+                imported, changed = manager.import_requirement_version(
+                    project_id,
+                    temporary_path,
+                    imported_by=imported_by,
+                    input_id=input_id,
+                    original_name=file.filename,
+                )
+            else:
+                imported = manager.import_input(
+                    project_id,
+                    temporary_path,
+                    category,
+                    imported_by=imported_by,
+                    input_id=input_id,
+                    original_name=file.filename,
+                )
+                changed = True
         except ArtifactStoreError as exc:
             if "input_id already exists" in str(exc):
                 raise ApiError(
@@ -569,10 +579,12 @@ def create_app(
         finally:
             temporary_path.unlink(missing_ok=True)
             await file.close()
+        payload = imported.model_dump(mode="json")
+        payload["changed"] = changed
         return _success(
             request,
-            ProjectInputData.model_validate(imported.model_dump(mode="json")),
-            message="文件导入成功",
+            ProjectInputData.model_validate(payload),
+            message="需求内容未变化，未创建新版本" if not changed else "文件导入成功",
         )
 
     @app.get(

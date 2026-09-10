@@ -156,6 +156,56 @@ def test_input_upload_is_persisted_and_visible_in_workflow_status(tmp_path):
     assert workflow.json()["data"]["input_files"][0]["input_id"] == "requirement-001"
 
 
+def test_requirement_reupload_of_identical_content_reports_unchanged(tmp_path):
+    with _client(tmp_path) as client:
+        client.post(
+            "/api/v1/projects",
+            json={"project_id": "demo", "name": "演示项目", "created_by": "tester-001"},
+        )
+        first = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "requirement-001",
+            },
+            files={"file": ("requirement.md", "# 修改收货地址\n初版", "text/markdown")},
+        )
+        # Same bytes, different filename — must be recognized as unchanged.
+        resend = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={"category": "requirement", "imported_by": "tester-001"},
+            files={"file": ("requirement-copy.md", "# 修改收货地址\n初版", "text/markdown")},
+        )
+        # Changed bytes — must create a new version.
+        revised = client.post(
+            "/api/v1/projects/demo/inputs",
+            data={
+                "category": "requirement",
+                "imported_by": "tester-001",
+                "input_id": "requirement-002",
+            },
+            files={"file": ("requirement.md", "# 修改收货地址\n修订版", "text/markdown")},
+        )
+        workflow = client.get("/api/v1/projects/demo/workflow")
+
+    assert first.status_code == 201
+    assert first.json()["data"]["changed"] is True
+
+    assert resend.status_code == 201
+    assert resend.json()["data"]["changed"] is False
+    assert resend.json()["data"]["input_id"] == "requirement-001"
+    assert "未变化" in resend.json()["message"]
+
+    assert revised.status_code == 201
+    assert revised.json()["data"]["changed"] is True
+    assert revised.json()["data"]["input_id"] == "requirement-002"
+
+    # Only two requirement inputs stored (identical re-upload was skipped).
+    input_ids = [item["input_id"] for item in workflow.json()["data"]["input_files"]]
+    assert input_ids == ["requirement-001", "requirement-002"]
+
+
 def test_input_upload_rejects_oversized_file_and_removes_temporary_file(tmp_path):
     app = create_app(tmp_path, max_upload_bytes=4)
     with TestClient(app) as client:

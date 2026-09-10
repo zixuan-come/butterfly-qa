@@ -120,6 +120,7 @@ class ProjectInputData(BaseModel):
     sha256: str
     imported_by: str
     imported_at: datetime
+    changed: bool = True
 
 
 class ProjectInputPreviewData(BaseModel):
