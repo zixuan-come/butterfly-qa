@@ -198,6 +198,7 @@ const creatingModule = ref(false)
 const uploadingRequirement = ref(false)
 const runningWorkflow = ref(false)
 const activeRun = ref(null)
+let workflowStartRequestId = 0
 let runPollingTimer = null
 const requirementFileInput = ref(null)
 const syncLabel = ref('正在连接')
@@ -434,8 +435,15 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  contextRequestId += 1
   stopRunPolling()
 })
+
+function isCurrentWorkflowContext(projectId, moduleId, requestId) {
+  return requestId === contextRequestId
+    && currentProject.value?.project_id === projectId
+    && (currentModule.value?.module_id || null) === moduleId
+}
 
 function stopRunPolling() {
   if (runPollingTimer) {
@@ -444,25 +452,30 @@ function stopRunPolling() {
   }
 }
 
-function scheduleRunPolling(projectId, moduleId, runId) {
+function scheduleRunPolling(projectId, moduleId, runId, requestId = contextRequestId) {
+  if (!isCurrentWorkflowContext(projectId, moduleId, requestId)
+    || activeRun.value?.run_id !== runId) return
   stopRunPolling()
   runPollingTimer = setTimeout(
-    () => pollWorkflowRun(projectId, moduleId, runId),
+    () => pollWorkflowRun(projectId, moduleId, runId, requestId),
     1200,
   )
 }
 
-async function pollWorkflowRun(projectId, moduleId, runId) {
+async function pollWorkflowRun(projectId, moduleId, runId, requestId = contextRequestId) {
+  const isCurrentRun = () => (
+    isCurrentWorkflowContext(projectId, moduleId, requestId)
+    && activeRun.value?.run_id === runId
+  )
+  if (!isCurrentRun()) return
   try {
     const task = await getWorkflowRun(projectId, runId, moduleId)
-    if (currentProject.value?.project_id !== projectId
-      || (currentModule.value?.module_id || null) !== moduleId
-      || activeRun.value?.run_id !== runId) return
+    if (!isCurrentRun()) return
     activeRun.value = task
     runningWorkflow.value = ['queued', 'running'].includes(task.status)
     syncLabel.value = runningWorkflow.value ? 'Agent 运行中' : '已同步'
     if (runningWorkflow.value) {
-      scheduleRunPolling(projectId, moduleId, runId)
+      scheduleRunPolling(projectId, moduleId, runId, requestId)
       return
     }
     if (task.status === 'succeeded') showToast('流程步骤执行完成，页面已刷新')
@@ -470,23 +483,29 @@ async function pollWorkflowRun(projectId, moduleId, runId) {
     if (task.status === 'failed') showToast(task.error || '流程执行失败，请查看执行详情')
     await refreshCurrentProject()
   } catch (error) {
-    if (activeRun.value?.run_id !== runId) return
-    scheduleRunPolling(projectId, moduleId, runId)
+    if (!isCurrentRun()) return
+    scheduleRunPolling(projectId, moduleId, runId, requestId)
   }
 }
 
 async function restoreLatestRun(workflowData, requestId) {
-  stopRunPolling()
   const projectId = workflowData.project_id
   const moduleId = currentModule.value?.module_id || null
+  if (!isCurrentWorkflowContext(projectId, moduleId, requestId)) return
+  const startRequestId = workflowStartRequestId
+  const isCurrentRequest = () => (
+    isCurrentWorkflowContext(projectId, moduleId, requestId)
+    && startRequestId === workflowStartRequestId
+  )
+  stopRunPolling()
   try {
     const task = await getLatestWorkflowRun(projectId, moduleId)
-    if (requestId !== contextRequestId) return
+    if (!isCurrentRequest()) return
     activeRun.value = task
     runningWorkflow.value = Boolean(task && ['queued', 'running'].includes(task.status))
-    if (runningWorkflow.value) scheduleRunPolling(projectId, moduleId, task.run_id)
+    if (runningWorkflow.value) scheduleRunPolling(projectId, moduleId, task.run_id, requestId)
   } catch (error) {
-    if (requestId !== contextRequestId) return
+    if (!isCurrentRequest()) return
     activeRun.value = null
     runningWorkflow.value = false
   }
@@ -877,16 +896,25 @@ async function continueWorkflow() {
     openCreateProject()
     return
   }
+  if (runningWorkflow.value) return
   const projectId = currentProject.value.project_id
   const moduleId = currentModule.value?.module_id || null
+  const requestId = contextRequestId
+  const startRequestId = ++workflowStartRequestId
+  const isCurrentRequest = () => (
+    isCurrentWorkflowContext(projectId, moduleId, requestId)
+    && startRequestId === workflowStartRequestId
+  )
   runningWorkflow.value = true
   syncLabel.value = 'Agent 运行中'
   try {
     const task = await startWorkflowRun(projectId, null, moduleId)
+    if (!isCurrentRequest()) return
     activeRun.value = task
-    scheduleRunPolling(projectId, moduleId, task.run_id)
+    scheduleRunPolling(projectId, moduleId, task.run_id, requestId)
     showToast('流程任务已开始，可在进度面板查看执行状态')
   } catch (error) {
+    if (!isCurrentRequest()) return
     runningWorkflow.value = false
     syncLabel.value = '同步失败'
     showToast(error.message)
