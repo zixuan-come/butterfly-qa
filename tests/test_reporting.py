@@ -136,7 +136,7 @@ def make_report(**overrides) -> ReportModel:
     return ReportModel(**values)
 
 
-def prepare_store(tmp_path) -> ArtifactStore:
+def prepare_store(tmp_path, execution: ExecutionBatch | None = None) -> ArtifactStore:
     store = ArtifactStore(tmp_path)
     evidence_root = store.project_root("demo-project") / "evidence"
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -144,7 +144,7 @@ def prepare_store(tmp_path) -> ArtifactStore:
     (evidence_root / "service.log").write_text(
         "service unavailable\n", encoding="utf-8"
     )
-    store.save_artifact(make_execution())
+    store.save_artifact(execution or make_execution())
     return store
 
 
@@ -162,6 +162,38 @@ def test_report_is_verified_rendered_and_waits_for_approval(tmp_path):
     assert "evidence/failure.png" in markdown
     assert workflow.current_state is WorkflowState.WAITING_REPORT_APPROVAL
     assert workflow.active_artifacts["test_report"].artifact_id == "report-001"
+
+
+def test_report_preserves_excel_evidence_notes_without_treating_them_as_attachments(tmp_path):
+    execution = make_execution()
+    failed = execution.records[1]
+    failed.evidence = []
+    failed.evidence_notes = ["未上传的截图 failure.png", "日志位置：D:/logs/payment.log"]
+    store = prepare_store(tmp_path, execution)
+
+    saved = ReportService(make_workflow(), store).accept(make_report())
+
+    markdown = saved.markdown_path.read_text(encoding="utf-8")
+    assert "证据说明（未经附件核验）：未上传的截图 failure.png；日志位置：D:/logs/payment.log" in markdown
+    failure_section = markdown.split("## 失败项", 1)[1].split("## 阻塞项", 1)[0]
+    assert "已核验附件：无" in failure_section
+    assert failed.evidence == []
+
+
+def test_report_displays_evidence_notes_separately_from_verified_attachments(tmp_path):
+    execution = make_execution()
+    execution.records[1].evidence_notes = ["仅为备注 | 不能证明附件存在\n第二行"]
+    execution.records[2].evidence_notes = ["服务不可用"]
+    execution.records[3].evidence_notes = ["暂不执行"]
+    store = prepare_store(tmp_path, execution)
+
+    saved = ReportService(make_workflow(), store).accept(make_report())
+
+    markdown = saved.markdown_path.read_text(encoding="utf-8")
+    assert "证据说明（未经附件核验）：仅为备注 \\| 不能证明附件存在 第二行" in markdown
+    assert "已核验附件：evidence/failure.png" in markdown
+    assert "证据说明（未经附件核验）：服务不可用" in markdown
+    assert "证据说明（未经附件核验）：暂不执行" in markdown
 
 
 def test_report_rejects_incorrect_statistics_without_saving(tmp_path):

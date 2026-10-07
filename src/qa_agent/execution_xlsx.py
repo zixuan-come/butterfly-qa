@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from zipfile import BadZipFile, ZipFile
 from xml.etree import ElementTree as ET
 
 from .schemas import ExecutionRecord, ExecutionResult, TestDesign
+from .test_design_xlsx import module_context_identity, test_design_sha256
 
 
 class ExecutionXlsxError(ValueError):
@@ -43,6 +45,13 @@ _CASES_SHEET = "测试用例"
 _NOTES_SHEET = "执行说明"
 _DESIGN_ID_LABEL = "测试设计 ID"
 _DESIGN_VERSION_LABEL = "测试设计版本"
+_PROJECT_ID_LABEL = "项目 ID"
+_MODULE_CONTEXT_LABEL = "模块上下文"
+_DESIGN_SHA256_LABEL = "测试设计 SHA256"
+_IDENTITY_LABELS = (
+    _PROJECT_ID_LABEL, _MODULE_CONTEXT_LABEL, _DESIGN_ID_LABEL,
+    _DESIGN_VERSION_LABEL, _DESIGN_SHA256_LABEL,
+)
 
 # An uploaded workbook is untrusted input; a small archive can expand into a huge
 # sheet, so every entry is read under a shared uncompressed-size budget.
@@ -51,7 +60,8 @@ _MAX_ENTRY_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
 
 # Excel stores dates as day offsets from 1900-01-00, with a phantom 1900-02-29.
 # Anchoring at 1899-12-30 is exact for every serial from 61 (1900-03-01) onwards.
-_EXCEL_EPOCH = datetime(1899, 12, 30, tzinfo=timezone.utc)
+_BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+_EXCEL_EPOCH = datetime(1899, 12, 30, tzinfo=_BEIJING_TIMEZONE)
 _MAX_EXCEL_SERIAL = 2958466
 
 
@@ -61,6 +71,7 @@ def parse_execution_xlsx(
     test_design: TestDesign,
     submitted_by: str,
     uploaded_at: datetime | None = None,
+    module_id: str | None = None,
 ) -> list[ExecutionRecord]:
     """Parse and validate one workbook against the active test design."""
 
@@ -81,7 +92,7 @@ def parse_execution_xlsx(
             [{"row": 1, "column": "页签", "message": "必须保留下载模板中的“测试用例”页签"}],
         )
 
-    _require_matching_template(workbook.get(_NOTES_SHEET), test_design)
+    _require_matching_template(workbook.get(_NOTES_SHEET), test_design, module_id)
 
     header_row, header = _read_header(rows)
     if header is None:
@@ -102,6 +113,9 @@ def parse_execution_xlsx(
     seen: set[tuple[str, int]] = set()
     unidentified_rows = False
     timestamp = uploaded_at or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=_BEIJING_TIMEZONE)
+    timestamp = timestamp.astimezone(timezone.utc)
     for row_number, row in rows:
         if row_number <= header_row or not any(cell.strip() for cell in row):
             continue
@@ -159,15 +173,38 @@ def parse_execution_xlsx(
 def _require_matching_template(
     rows: list[tuple[int, list[str]]] | None,
     test_design: TestDesign,
+    module_id: str | None,
 ) -> None:
     """Reject a stale template before it produces one error per case row."""
 
-    if not rows:
-        return
-    labels = {row[0].strip(): row[1].strip() for _, row in rows if len(row) >= 2}
+    labels: dict[str, str] = {}
+    issues: list[dict[str, Any]] = []
+    for row_number, row in rows or []:
+        if not row or row[0].strip() not in _IDENTITY_LABELS:
+            continue
+        label = row[0].strip()
+        if label in labels:
+            issues.append({"row": row_number, "column": label, "message": "身份字段不能重复"})
+        labels[label] = _cell(row, 1).strip()
+    issues.extend(
+        {"row": None, "column": label, "message": "缺少必需身份字段"}
+        for label in _IDENTITY_LABELS if not labels.get(label)
+    )
+    if issues:
+        raise ExecutionXlsxError("执行结果模板身份信息不完整，请重新下载模板", issues)
+    expected_identity = {
+        _PROJECT_ID_LABEL: test_design.meta.project_id,
+        _MODULE_CONTEXT_LABEL: module_context_identity(module_id),
+    }
+    for label, expected in expected_identity.items():
+        if labels[label] != expected:
+            raise ExecutionXlsxError(
+                "执行结果文件不属于当前项目或模块，请重新下载模板",
+                [{"row": None, "column": label, "message": f"文件为 {labels[label]}，当前为 {expected}"}],
+            )
     design_id = labels.get(_DESIGN_ID_LABEL, "")
     design_version = labels.get(_DESIGN_VERSION_LABEL, "")
-    if design_id and design_id != test_design.meta.artifact_id:
+    if design_id != test_design.meta.artifact_id:
         raise ExecutionXlsxError(
             "执行结果文件不属于当前测试设计，请重新下载模板",
             [{
@@ -176,21 +213,23 @@ def _require_matching_template(
                 "message": f"文件为 {design_id}，当前为 {test_design.meta.artifact_id}",
             }],
         )
-    if design_version:
-        try:
-            parsed_float = float(design_version)
-            parsed_version = int(parsed_float) if math.isfinite(parsed_float) else None
-        except (TypeError, ValueError, OverflowError):
-            parsed_version = None
-        if parsed_version is not None and parsed_version != test_design.meta.version:
-            raise ExecutionXlsxError(
-                "执行结果文件使用的是旧版模板，请重新下载模板",
-                [{
-                    "row": None,
-                    "column": _DESIGN_VERSION_LABEL,
-                    "message": f"文件为 v{parsed_version}，当前为 v{test_design.meta.version}",
-                }],
-            )
+    parsed_version = _parse_positive_int(design_version, 1, _DESIGN_VERSION_LABEL, issues)
+    if issues:
+        raise ExecutionXlsxError("执行结果模板版本非法，请重新下载模板", issues)
+    if parsed_version != test_design.meta.version:
+        raise ExecutionXlsxError(
+            "执行结果文件使用的是旧版模板，请重新下载模板",
+            [{
+                "row": None,
+                "column": _DESIGN_VERSION_LABEL,
+                "message": f"文件为 v{parsed_version}，当前为 v{test_design.meta.version}",
+            }],
+        )
+    if labels[_DESIGN_SHA256_LABEL] != test_design_sha256(test_design):
+        raise ExecutionXlsxError(
+            "执行结果文件的测试设计内容已变化，请重新下载模板",
+            [{"row": None, "column": _DESIGN_SHA256_LABEL, "message": "设计内容校验不匹配"}],
+        )
 
 
 def _read_header(rows: list[tuple[int, list[str]]]) -> tuple[int, dict[str, int] | None]:
@@ -323,7 +362,7 @@ def _parse_positive_int(value: str, row: int, column: str, issues: list[dict[str
     except (TypeError, ValueError):
         issues.append({"row": row, "column": column, "message": "必须是正整数"})
         return None
-    if not math.isfinite(parsed) or parsed < 1 or parsed != int(parsed):
+    if not math.isfinite(parsed) or parsed < 1 or Decimal(text) != int(parsed):
         issues.append({"row": row, "column": column, "message": "必须是正整数"})
         return None
     return int(parsed)
@@ -351,7 +390,7 @@ def _parse_datetime(value: str, row: int, column: str, issues: list[dict[str, An
             issues.append({"row": row, "column": column, "message": "时间格式应为 YYYY-MM-DD HH:MM[:SS]"})
             return fallback
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=_BEIJING_TIMEZONE)
     return parsed.astimezone(timezone.utc)
 
 
@@ -364,7 +403,7 @@ def _parse_excel_serial(text: str) -> datetime | None:
         return None
     if not 1 <= serial < _MAX_EXCEL_SERIAL:
         return None
-    return _EXCEL_EPOCH + timedelta(days=serial)
+    return (_EXCEL_EPOCH + timedelta(days=serial)).astimezone(timezone.utc)
 
 
 def _split_values(value: str) -> list[str]:

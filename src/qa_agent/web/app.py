@@ -1053,6 +1053,7 @@ def create_app(
                     test_design=design,
                     submitted_by=submitted_by,
                     uploaded_at=now,
+                    module_id=module_id,
                 )
             except ExecutionXlsxError as exc:
                 raise ApiError(
@@ -1356,7 +1357,7 @@ def create_app(
             media_type = "application/json"
             extension = "json"
         elif format == "xlsx":
-            path = artifact_dir / f"v{pointer.version}.xlsx"
+            path = artifact_dir / f"v{pointer.version}.execution-v2.xlsx"
             if not path.is_file():
                 content = store.load_artifact(
                     project_id,
@@ -1364,7 +1365,7 @@ def create_app(
                     pointer.artifact_id,
                     pointer.version,
                 )
-                save_test_design_xlsx(content, path)
+                save_test_design_xlsx(content, path, module_id=module_id)
             media_type = (
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )

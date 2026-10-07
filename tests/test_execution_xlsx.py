@@ -17,6 +17,12 @@ from qa_agent.schemas import (
     TestPoint as PointModel,
     TestStep as StepModel,
 )
+from qa_agent.test_design_xlsx import (
+    module_context_identity,
+    render_test_design_xlsx,
+    save_test_design_xlsx,
+    test_design_sha256 as design_sha256,
+)
 
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -89,11 +95,18 @@ def _build_workbook(sheets: list[tuple[str, list[tuple[int, list]]]]) -> bytes:
     return stream.getvalue()
 
 
-def _notes_rows(design_id: str = "design-001", version: int = 1) -> list[tuple[int, list]]:
+def _notes_rows(
+    design_id: str = "design-001", version: int = 1, *,
+    test_design: DesignModel | None = None, module_id: str | None = None,
+) -> list[tuple[int, list]]:
+    design = test_design or make_design()
     return [
         (1, ["字段", "说明"]),
         (2, ["测试设计 ID", design_id]),
         (3, ["测试设计版本", version]),
+        (4, ["项目 ID", design.meta.project_id]),
+        (5, ["模块上下文", module_context_identity(module_id)]),
+        (6, ["测试设计 SHA256", design_sha256(design)]),
     ]
 
 
@@ -101,15 +114,18 @@ def _cases_sheet(rows: list[tuple[int, list]]) -> tuple[str, list[tuple[int, lis
     return ("测试用例", [(1, _HEADER)] + rows)
 
 
-def _workbook(case_rows, *, design_id="design-001", version=1) -> bytes:
+def _workbook(
+    case_rows, *, design_id="design-001", version=1,
+    test_design=None, module_id=None,
+) -> bytes:
     return _build_workbook([
         _cases_sheet(case_rows),
-        ("执行说明", _notes_rows(design_id, version)),
+        ("执行说明", _notes_rows(design_id, version, test_design=test_design, module_id=module_id)),
     ])
 
 
 def make_design(case_ids=("TC-001", "TC-002")) -> DesignModel:
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return DesignModel(
         meta=ArtifactMeta(
             artifact_id="design-001",
@@ -167,8 +183,8 @@ def test_parses_complete_workbook_into_records():
     assert records[1].environment == "未填写环境"
 
 
-def test_reads_excel_serial_date_as_utc_timestamp():
-    # 45900.5 is 2025-08-31 12:00 UTC — Excel stores typed dates as day offsets.
+def test_reads_excel_serial_date_as_beijing_time_then_converts_to_utc():
+    # 45900.5 is 2025-08-31 12:00 Beijing time (04:00 UTC).
     workbook = _workbook([
         (2, _row("TC-001", 1, "通过", "ok", executed_at=45900.5)),
         (3, _row("TC-002", 1, "通过", "ok")),
@@ -176,7 +192,7 @@ def test_reads_excel_serial_date_as_utc_timestamp():
 
     records = parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
 
-    assert records[0].executed_at == datetime(2025, 8, 31, 12, 0, tzinfo=timezone.utc)
+    assert records[0].executed_at == datetime(2025, 8, 31, 4, 0, tzinfo=timezone.utc)
 
 
 def test_parses_textual_datetime_variants():
@@ -187,7 +203,7 @@ def test_parses_textual_datetime_variants():
 
     records = parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
 
-    assert records[0].executed_at == datetime(2026, 1, 2, 8, 30, tzinfo=timezone.utc)
+    assert records[0].executed_at == datetime(2026, 1, 2, 0, 30, tzinfo=timezone.utc)
 
 
 def test_missing_cases_sheet_is_rejected():
@@ -200,14 +216,15 @@ def test_missing_cases_sheet_is_rejected():
 
 
 def test_missing_required_column_is_rejected_with_issue():
+    design = make_design(("TC-001",))
     header = [column for column in _HEADER if column != "实际结果"]
     workbook = _build_workbook([
         ("测试用例", [(1, header), (2, ["TC-001", 1, "通过", "SIT"])]),
-        ("执行说明", _notes_rows()),
+        ("执行说明", _notes_rows(test_design=design)),
     ])
 
     with pytest.raises(ExecutionXlsxError) as exc:
-        parse_execution_xlsx(workbook, test_design=make_design(("TC-001",)), submitted_by="uploader")
+        parse_execution_xlsx(workbook, test_design=design, submitted_by="uploader")
 
     assert any(issue["column"] == "实际结果" for issue in exc.value.issues)
 
@@ -463,9 +480,186 @@ def test_non_finite_template_version_label_is_rejected_cleanly(bad_label):
         version=bad_label,
     )
 
-    # Parsing must not raise OverflowError; either it accepts (label ignored) or
-    # rejects with a template-version issue — never an unhandled 500.
-    try:
+    with pytest.raises(ExecutionXlsxError, match="模板"):
         parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
-    except ExecutionXlsxError as exc:
-        assert "模板" in str(exc.value)
+
+
+def _complete_case_rows():
+    return [
+        (2, _row("TC-001", 1, "通过", "ok")),
+        (3, _row("TC-002", 1, "失败", "报错", evidence="failure.png")),
+    ]
+
+
+def _filled_export(design, *, module_id=None):
+    template = render_test_design_xlsx(design, module_id=module_id)
+    stream = BytesIO()
+    with ZipFile(BytesIO(template)) as source, ZipFile(stream, "w", compression=ZIP_DEFLATED) as target:
+        for entry in source.infolist():
+            body = source.read(entry.filename)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                body = _sheet_xml([(1, _HEADER), *_complete_case_rows()]).encode("utf-8")
+            target.writestr(entry, body)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("module_id", [None, "login", "__v1__"])
+def test_exported_template_round_trips_with_exact_context(module_id):
+    design = make_design()
+    workbook = _filled_export(design, module_id=module_id)
+
+    records = parse_execution_xlsx(
+        workbook, test_design=design, module_id=module_id, submitted_by="uploader",
+    )
+
+    assert len(records) == 2
+    assert records[1].evidence_notes == ["failure.png"]
+    assert records[1].evidence == []
+
+
+def test_saved_template_keeps_module_context(tmp_path):
+    design = make_design()
+    path = save_test_design_xlsx(design, tmp_path / "design.xlsx", module_id="login")
+    workbook = execution_xlsx._read_workbook(path)
+    labels = {row[0]: row[1] for _, row in workbook["执行说明"]}
+
+    assert labels["模块上下文"] == "module:login"
+    assert labels["项目 ID"] == design.meta.project_id
+    assert labels["测试设计 SHA256"] == design_sha256(design)
+
+
+def test_design_hash_is_canonical_for_model_and_reordered_mapping():
+    design = make_design()
+    mapping = design.model_dump(mode="json")
+    reordered = dict(reversed(list(mapping.items())))
+    reordered["meta"] = dict(reversed(list(mapping["meta"].items())))
+
+    assert design_sha256(design) == design_sha256(reordered)
+
+
+def test_cross_project_upload_rejected_even_when_design_and_case_ids_match():
+    design = make_design()
+    workbook = _filled_export(design)
+    other_project = design.model_copy(deep=True)
+    other_project.meta.project_id = "other-project"
+
+    with pytest.raises(ExecutionXlsxError, match="当前项目或模块") as exc:
+        parse_execution_xlsx(workbook, test_design=other_project, submitted_by="uploader")
+
+    assert exc.value.issues[0]["column"] == "项目 ID"
+
+
+@pytest.mark.parametrize("source_module,target_module", [
+    ("login", "payment"), (None, "login"), ("login", None),
+    (None, "__v1__"), (None, "legacy:v1"),
+])
+def test_cross_module_upload_is_rejected(source_module, target_module):
+    design = make_design()
+    workbook = _filled_export(design, module_id=source_module)
+
+    with pytest.raises(ExecutionXlsxError, match="当前项目或模块") as exc:
+        parse_execution_xlsx(
+            workbook, test_design=design, module_id=target_module, submitted_by="uploader",
+        )
+
+    assert exc.value.issues[0]["column"] == "模块上下文"
+
+
+def test_changed_design_content_rejected_even_when_all_ids_and_versions_match():
+    design = make_design()
+    workbook = _filled_export(design)
+    revised = design.model_copy(deep=True)
+    revised.test_cases[0].steps[0].expected_result = "新的验收标准"
+
+    with pytest.raises(ExecutionXlsxError, match="内容已变化") as exc:
+        parse_execution_xlsx(workbook, test_design=revised, submitted_by="uploader")
+
+    assert exc.value.issues[0]["column"] == "测试设计 SHA256"
+
+
+def test_legacy_template_without_identity_is_rejected():
+    notes = _notes_rows()[:3]
+    workbook = _build_workbook([_cases_sheet(_complete_case_rows()), ("执行说明", notes)])
+
+    with pytest.raises(ExecutionXlsxError, match="重新下载模板"):
+        parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+
+def test_missing_identity_sheet_cannot_skip_validation():
+    workbook = _build_workbook([_cases_sheet(_complete_case_rows())])
+
+    with pytest.raises(ExecutionXlsxError, match="身份信息不完整"):
+        parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+
+@pytest.mark.parametrize("label", [
+    "项目 ID", "模块上下文", "测试设计 ID", "测试设计版本", "测试设计 SHA256",
+])
+@pytest.mark.parametrize("invalid_identity", ["missing", "blank", "duplicate"])
+def test_required_identity_labels_cannot_be_removed_blanked_or_duplicated(label, invalid_identity):
+    notes = _notes_rows()
+    selected = next(row for row in notes if row[1][0] == label)
+    if invalid_identity == "missing":
+        notes.remove(selected)
+    elif invalid_identity == "blank":
+        selected[1][1] = " "
+    else:
+        notes.append((7, selected[1].copy()))
+    workbook = _build_workbook([_cases_sheet(_complete_case_rows()), ("执行说明", notes)])
+
+    with pytest.raises(ExecutionXlsxError, match="身份信息不完整") as exc:
+        parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+    assert any(issue["column"] == label for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("invalid_version", [
+    "garbage", "nan", "-inf", "0", "-1", "1.5", "1.0000000000000001",
+])
+def test_invalid_design_version_cannot_skip_validation(invalid_version):
+    workbook = _workbook(_complete_case_rows(), version=invalid_version)
+
+    with pytest.raises(ExecutionXlsxError, match="模板版本非法"):
+        parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+
+@pytest.mark.parametrize("invalid_hash", ["sha256", "0" * 64, "f" * 63, "g" * 64])
+def test_invalid_design_hash_is_rejected(invalid_hash):
+    notes = _notes_rows()
+    notes[-1][1][1] = invalid_hash
+    workbook = _build_workbook([_cases_sheet(_complete_case_rows()), ("执行说明", notes)])
+
+    with pytest.raises(ExecutionXlsxError, match="内容已变化"):
+        parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("2026-10-07 10:00", datetime(2026, 10, 7, 2, tzinfo=timezone.utc)),
+    ("2026年10月07日 10:00:30", datetime(2026, 10, 7, 2, 0, 30, tzinfo=timezone.utc)),
+    ("2026-10-07T10:00:00+08:00", datetime(2026, 10, 7, 2, tzinfo=timezone.utc)),
+    ("2026-10-07T10:00:00-05:00", datetime(2026, 10, 7, 15, tzinfo=timezone.utc)),
+    ("2026-10-07T10:00:00Z", datetime(2026, 10, 7, 10, tzinfo=timezone.utc)),
+])
+def test_execution_datetime_uses_beijing_default_and_honors_explicit_offsets(value, expected):
+    workbook = _workbook([
+        (2, _row("TC-001", 1, "通过", "ok", executed_at=value)),
+        (3, _row("TC-002", 1, "通过", "ok")),
+    ])
+
+    records = parse_execution_xlsx(workbook, test_design=make_design(), submitted_by="uploader")
+
+    assert records[0].executed_at == expected
+    assert records[0].executed_at.tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize("upload_time", [
+    datetime(2026, 10, 7, 2, tzinfo=timezone.utc), datetime(2026, 10, 7, 10),
+])
+def test_blank_execution_time_uses_upload_instant_in_utc(upload_time):
+    workbook = _workbook(_complete_case_rows())
+
+    records = parse_execution_xlsx(
+        workbook, test_design=make_design(), submitted_by="uploader", uploaded_at=upload_time,
+    )
+
+    assert all(record.executed_at == datetime(2026, 10, 7, 2, tzinfo=timezone.utc) for record in records)

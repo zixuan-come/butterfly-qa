@@ -3,19 +3,39 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from hashlib import sha256
 from io import BytesIO
+import json
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from .schemas import TestDesign
+
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+LEGACY_MODULE_CONTEXT = "legacy:v1"
 
 
-def render_test_design_xlsx(test_design: Any) -> bytes:
+def test_design_sha256(test_design: Any) -> str:
+    """Hash the canonical, complete design shared by export and import."""
+    data = TestDesign.model_validate(test_design).model_dump(mode="json")
+    canonical = json.dumps(
+        data, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    )
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def module_context_identity(module_id: str | None) -> str:
+    """Keep the legacy project context distinct from every named module."""
+    return LEGACY_MODULE_CONTEXT if module_id is None else f"module:{module_id}"
+
+
+def render_test_design_xlsx(test_design: Any, *, module_id: str | None = None) -> bytes:
     """Render a TestDesign model or mapping as a practical Excel workbook."""
     data = (
         test_design.model_dump(mode="json")
@@ -82,12 +102,16 @@ def render_test_design_xlsx(test_design: Any) -> bytes:
             "name": "执行说明",
             "columns": [("字段", 22), ("说明", 80)],
             "rows": [
+                ["项目 ID", (data.get("meta") or {}).get("project_id", "")],
+                ["模块上下文", module_context_identity(module_id)],
                 ["测试设计 ID", (data.get("meta") or {}).get("artifact_id", "")],
                 ["测试设计版本", (data.get("meta") or {}).get("version", 1)],
+                ["测试设计 SHA256", test_design_sha256(test_design)],
                 ["执行方式", "请在线下执行测试用例，在测试用例页签填写执行字段后上传本文件"],
                 ["执行结果", "通过、失败、阻塞、跳过"],
                 ["必填字段", "执行结果、实际结果；执行人、执行环境和执行时间可留空并使用上传信息补全"],
                 ["证据说明", "填写截图、日志、录屏、缺陷附件的文件名、路径或链接；仅作为执行记录保存"],
+                ["执行时间", "未注明时区的时间按北京时间（UTC+08:00）处理；也可填写带时区的 ISO 时间"],
             ],
         },
     ]
@@ -107,10 +131,12 @@ def render_test_design_xlsx(test_design: Any) -> bytes:
     return stream.getvalue()
 
 
-def save_test_design_xlsx(test_design: Any, path: Path) -> Path:
+def save_test_design_xlsx(
+    test_design: Any, path: Path, *, module_id: str | None = None,
+) -> Path:
     """Render and persist an XLSX file at the supplied artifact path."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(render_test_design_xlsx(test_design))
+    path.write_bytes(render_test_design_xlsx(test_design, module_id=module_id))
     return path
 
 

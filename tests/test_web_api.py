@@ -464,9 +464,10 @@ def _seed_test_design(
     tmp_path,
     state: WorkflowState,
     project_id: str = "demo",
+    module_id: str | None = None,
 ) -> ArtifactStore:
     timestamp = datetime.now(timezone.utc)
-    store = ArtifactStore(tmp_path / "projects")
+    store = ArtifactStore(tmp_path / "projects", module_id=module_id)
     design = DesignModel(
         meta=ArtifactMeta(
             artifact_id="design-001",
@@ -503,8 +504,7 @@ def _seed_test_design(
         ],
     )
     store.save_artifact(design)
-    manager = ProjectManager(store.projects_root)
-    workflow = manager.load_workflow(project_id)
+    workflow = WorkflowRun.model_validate(store.load_workflow(project_id))
     workflow.current_state = state
     workflow.active_artifacts["test_design"] = ArtifactPointer(
         artifact_id="design-001",
@@ -1254,7 +1254,7 @@ def test_test_design_downloads_current_xlsx(tmp_path):
         / "artifacts"
         / "test_design"
         / "design-001"
-        / "v1.xlsx"
+        / "v1.execution-v2.xlsx"
     ).is_file()
 
 

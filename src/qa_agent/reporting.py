@@ -225,13 +225,15 @@ def _result_section(
     for record in records:
         defects = ", ".join(record.defect_refs) or "无"
         evidence = ", ".join(item.path for item in record.evidence) or "无"
+        evidence_notes = "；".join(record.evidence_notes) or "无"
         lines.extend(
             [
                 f"### {record.case_id}:v{record.case_version}",
                 "",
                 f"- 实际结果：{_escape(record.actual_result)}",
                 f"- 关联缺陷：{_escape(defects)}",
-                f"- 测试证据：{_escape(evidence)}",
+                f"- 证据说明（未经附件核验）：{_escape(evidence_notes)}",
+                f"- 已核验附件：{_escape(evidence)}",
                 "",
             ]
         )
