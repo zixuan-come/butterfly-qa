@@ -203,6 +203,16 @@ class TestDesign(BaseModel):
     test_points: list[TestPoint] = Field(min_length=1)
     test_cases: list[TestCase] = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def require_unique_identifiers(self) -> "TestDesign":
+        case_ids = [case.case_id for case in self.test_cases]
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("test_cases must contain unique case_id values")
+        point_ids = [point.test_point_id for point in self.test_points]
+        if len(point_ids) != len(set(point_ids)):
+            raise ValueError("test_points must contain unique test_point_id values")
+        return self
+
 
 class TestCaseReviewIssue(BaseModel):
     model_config = ConfigDict(extra="forbid")

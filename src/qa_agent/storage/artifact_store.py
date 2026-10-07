@@ -36,11 +36,11 @@ class ArtifactStore:
 
     def project_root(self, project_id: str) -> Path:
         self._validate_component(project_id, "project_id")
-        project_root = (self.projects_root / project_id).resolve()
+        project_root = self._direct_child(self.projects_root, project_id, "project")
         if self.module_id is not None:
-            project_root = (project_root / "modules" / self.module_id).resolve()
-        if self.projects_root not in project_root.parents:
-            raise ArtifactStoreError("project path escapes projects root")
+            self._validate_component(self.module_id, "module_id")
+            modules_root = self._direct_child(project_root, "modules", "modules")
+            project_root = self._direct_child(modules_root, self.module_id, "module")
         return project_root
 
     def save_module(self, project_id: str, module: BaseModel | dict[str, Any]) -> Path:
@@ -156,19 +156,22 @@ class ArtifactStore:
         root = self.project_root(project_id)
         if not root.is_dir():
             raise ArtifactStoreError(f"project does not exist: {project_id}")
+        root = self.project_root(project_id)
         shutil.rmtree(root)
 
     def delete_module(self, project_id: str, module_id: str | None = None) -> None:
         """Permanently remove one feature module context."""
 
-        resolved_module_id = module_id or self.module_id
+        resolved_module_id = module_id if module_id is not None else self.module_id
         if resolved_module_id is None:
             raise ArtifactStoreError("module_id is required")
         module_store = ArtifactStore(self.projects_root, module_id=resolved_module_id)
         root = module_store.project_root(project_id)
         if not root.is_dir():
             raise ArtifactStoreError(f"feature module does not exist: {resolved_module_id}")
+        root = module_store.project_root(project_id)
         shutil.rmtree(root)
+
     def save_decision(
         self,
         project_id: str,
@@ -223,9 +226,17 @@ class ArtifactStore:
 
     @classmethod
     def _validate_component(cls, value: str, name: str) -> str:
-        if not value or not cls._SAFE_COMPONENT.fullmatch(value):
+        if not value or value in {".", ".."} or not cls._SAFE_COMPONENT.fullmatch(value):
             raise ArtifactStoreError(f"invalid {name}: {value!r}")
         return value
+
+    @staticmethod
+    def _direct_child(parent: Path, component: str, name: str) -> Path:
+        path = parent / component
+        resolved = path.resolve()
+        if resolved != path or resolved.parent != parent:
+            raise ArtifactStoreError(f"{name} path must be a direct child without aliases")
+        return path
 
     @staticmethod
     def _to_jsonable(value: BaseModel | dict[str, Any]) -> dict[str, Any]:

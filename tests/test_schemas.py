@@ -9,6 +9,7 @@ from qa_agent.schemas import (
     ArtifactStatus,
     HumanApproval,
     TestCase as CaseModel,
+    TestDesign as DesignModel,
     TestStep as StepModel,
 )
 from qa_agent.validation import ArtifactValidationError, validate_artifact
@@ -113,3 +114,71 @@ def test_approved_human_approval_can_omit_comment() -> None:
     )
 
     assert approval.comment == ""
+
+
+def make_design_payload() -> dict:
+    return {
+        "meta": make_meta(),
+        "test_points": [
+            {
+                "test_point_id": "TP-001",
+                "requirement_refs": ["REQ-001"],
+                "category": "normal",
+                "description": "Save a valid address",
+            }
+        ],
+        "test_cases": [
+            {
+                "case_id": "TC-001",
+                "version": 1,
+                "requirement_refs": ["REQ-001"],
+                "test_point_refs": ["TP-001"],
+                "title": "Save a valid address",
+                "priority": "P1",
+                "steps": [
+                    {
+                        "step_no": 1,
+                        "action": "Save the address",
+                        "expected_result": "The address is saved",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("second_version", [1, 2])
+def test_design_rejects_duplicate_case_ids_even_across_versions(second_version) -> None:
+    payload = make_design_payload()
+    payload["test_cases"].append(
+        {**payload["test_cases"][0], "title": "Different case", "version": second_version}
+    )
+    with pytest.raises(ArtifactValidationError, match="unique case_id"):
+        validate_artifact(DesignModel, payload)
+
+
+def test_design_rejects_duplicate_test_point_ids() -> None:
+    payload = make_design_payload()
+    payload["test_points"].append(
+        {**payload["test_points"][0], "description": "Different test point"}
+    )
+    with pytest.raises(ArtifactValidationError, match="unique test_point_id"):
+        validate_artifact(DesignModel, payload)
+
+
+def test_design_accepts_distinct_ids_and_reuses_them_in_new_artifact_versions() -> None:
+    payload = make_design_payload()
+    payload["test_points"].append(
+        {**payload["test_points"][0], "test_point_id": "TP-002"}
+    )
+    payload["test_cases"].append(
+        {**payload["test_cases"][0], "case_id": "TC-002", "test_point_refs": ["TP-002"]}
+    )
+    first = validate_artifact(DesignModel, payload)
+    payload["meta"]["version"] = 2
+    second = validate_artifact(DesignModel, payload)
+
+    assert [case.case_id for case in second.test_cases] == ["TC-001", "TC-002"]
+    assert [point.test_point_id for point in second.test_points] == ["TP-001", "TP-002"]
+    assert first.meta.version == 1
+    assert second.meta.version == 2
