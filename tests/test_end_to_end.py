@@ -116,7 +116,10 @@ def _agent_outputs(project_id: str) -> list[str]:
         ],
     }
     case_review = {
-        "meta": _meta("case-review-001", "testcase_review", project_id),
+        "meta": {
+            **_meta("case-review-001", "testcase_review", project_id),
+            "source_artifacts": ["design-001:v1"],
+        },
         "decision": "pass",
         "issues": [],
         "coverage_summary": "已覆盖核心成功路径。",

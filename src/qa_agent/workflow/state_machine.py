@@ -42,13 +42,47 @@ class WorkflowStateMachine:
         related_artifacts: list[ArtifactPointer] | None = None,
         occurred_at: datetime | None = None,
     ) -> WorkflowTransition:
+        validate_transition(self.current_state, target)
+        return self._record_transition(
+            target,
+            triggered_by=triggered_by,
+            reason=reason,
+            related_artifacts=related_artifacts,
+            occurred_at=occurred_at,
+        )
+
+    def restart_requirement_review(
+        self,
+        *,
+        triggered_by: str,
+        reason: str,
+        related_artifacts: list[ArtifactPointer],
+        occurred_at: datetime,
+    ) -> WorkflowTransition:
+        """Record a source-version reset owned by the import service, not the AI."""
+        return self._record_transition(
+            WorkflowState.REQUIREMENT_RECEIVED,
+            triggered_by=triggered_by,
+            reason=reason,
+            related_artifacts=related_artifacts,
+            occurred_at=occurred_at,
+        )
+
+    def _record_transition(
+        self,
+        target: WorkflowState,
+        *,
+        triggered_by: str,
+        reason: str,
+        related_artifacts: list[ArtifactPointer] | None = None,
+        occurred_at: datetime | None = None,
+    ) -> WorkflowTransition:
         if not triggered_by.strip():
             raise ValueError("triggered_by must not be empty")
         if not reason.strip():
             raise ValueError("reason must not be empty")
 
         current = self.current_state
-        validate_transition(current, target)
         transition_time = occurred_at or datetime.now(timezone.utc)
 
         record = WorkflowTransition(

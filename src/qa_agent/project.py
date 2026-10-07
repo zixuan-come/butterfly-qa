@@ -15,6 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .storage import ArtifactStore, ArtifactStoreError
 from .workflow.models import InputFilePointer, WorkflowRun
+from .workflow.state_machine import WorkflowStateMachine
+from .workflow.states import WorkflowState
 
 
 class InputCategory(str, Enum):
@@ -145,6 +147,7 @@ class ProjectManager:
 
         project = self._load_record(project_id)
         workflow = WorkflowRun.model_validate(self.store.load_workflow(project_id))
+        had_requirement = any(item.category == "requirement" for item in workflow.input_files)
         resolved_input_id = input_id or f"input-{uuid4().hex}"
         if not self._SAFE_INPUT_ID.fullmatch(resolved_input_id):
             raise ArtifactStoreError(f"invalid input_id: {resolved_input_id!r}")
@@ -174,8 +177,25 @@ class ProjectManager:
         workflow.input_files.append(imported.pointer())
         if category == InputCategory.REQUIREMENT:
             workflow.current_requirement_input_id = imported.input_id
-            # A new requirement version invalidates any prior risk acceptance.
             workflow.accepted_requirement_review = None
+            workflow.accepted_requirement_input_id = None
+            workflow.requirement_risk_acceptance_invalidated = True
+            workflow.testcase_review_design = None
+            workflow.revision_feedback.clear()
+            previous_artifacts = list(workflow.active_artifacts.values())
+            workflow.active_artifacts.clear()
+            if (
+                had_requirement
+                or previous_artifacts
+                or workflow.current_state is not WorkflowState.REQUIREMENT_RECEIVED
+            ):
+                WorkflowStateMachine(workflow).restart_requirement_review(
+                    triggered_by=imported_by,
+                    reason=f"需求版本已更新为 {imported.input_id}，旧审批和派生产物失效，重新开展需求评审",
+                    related_artifacts=previous_artifacts,
+                    occurred_at=now,
+                )
+            workflow.manual_resume_state = None
         workflow.updated_at = now
         self._save_record(project_id, project)
         self.store.save_workflow(project_id, workflow)

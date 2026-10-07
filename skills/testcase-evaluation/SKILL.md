@@ -44,6 +44,8 @@ description: 独立评估测试点和功能测试用例的覆盖性、正确性�
 
 输出必须符合 `TestCaseReview`，使用 JSON。
 
+`meta.source_artifacts` 必须包含本轮实际评审的完整设计版本引用，例如 `test-design-001:v2`。不得引用旧版本，也不得在修订后的设计中只写无版本 ID；新版设计必须独立重评审，不能沿用旧评审结论。
+
 ```json
 {
   "meta": {
@@ -52,7 +54,7 @@ description: 独立评估测试点和功能测试用例的覆盖性、正确性�
     "project_id": "demo-project",
     "version": 1,
     "status": "completed",
-    "source_artifacts": ["test-design-001", "requirement-analysis-001"],
+    "source_artifacts": ["test-design-001:v1", "requirement-analysis-001:v1"],
     "created_by": "testcase-review-agent",
     "created_at": "2026-01-01T00:00:00Z",
     "updated_at": "2026-01-01T00:00:00Z"

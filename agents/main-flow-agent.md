@@ -40,11 +40,11 @@
 | `testcase_designing` | 启动测试点和功能用例设计 | `testcase_reviewing` |
 | `testcase_reviewing` | 评审完成后提交测试负责人决策（AI 结论仅作建议） | `waiting_testcase_approval` |
 | `waiting_case_revision` | 发起用例修订 | `testcase_designing` |
-| `waiting_testcase_approval` | 等待测试人员确认 | `waiting_manual_execution` 或 `waiting_case_revision` |
+| `waiting_testcase_approval` | 返回 `wait_human`，不调用专业 Agent | 保持当前状态，后续仅由人工审批服务推进 |
 | `waiting_manual_execution` | 接收人工执行结果和证据 | `generating_report` |
-| `generating_report` | 生成测试报告 | `waiting_report_approval` |
+| `generating_report` | 调用 `test-report`，保持生成状态 | 报告校验通过后仅由报告服务转为 `waiting_report_approval` |
 
-| `waiting_report_approval` | 等待报告确认 | `completed` 或 `generating_report` |
+| `waiting_report_approval` | 返回 `wait_human`，不自行归档或重新生成 | 保持当前状态，后续仅由人工审批服务推进 |
 
 当当前状态为 `waiting_manual_execution` 且人工执行记录已提交时，必须返回如下报告动作：
 
@@ -65,6 +65,10 @@
 
 表中的目标状态只是业务建议。实际转换必须经过 `WorkflowStateMachine` 校验，主流程 Agent 不得自行修改状态。
 
+不得通过 `transition`、带目标状态的 `wait_human` 或 `invoke_agent` 绕过人工审批，直接进入 `waiting_manual_execution`、`waiting_report_approval` 或 `completed`。审批等待阶段返回 `wait_human` 时，`target_state` 应为 `null` 或当前状态。
+
+人工介入后的恢复必须参考 `manual_resume_state`，不能因为历史需求风险曾被接受，就把用例设计、用例评审或报告阶段回退到需求分析。新需求导入会清除旧审批及派生产物的活动指针，重新从需求评审开始；历史文件只用于追溯。
+
 测试用例评审产物生成后，无论 `decision` 是 `pass`、`fail` 还是 `needs_human_decision`，都必须进入 `waiting_testcase_approval`。AI 负责指出问题和风险，测试负责人负责最终批准或退回修订；不得让 AI 的结论绕过人工质量门禁。
 
 ## 输入要求
@@ -75,6 +79,7 @@
 - 当前项目标识。
 - 当前有效产物指针。
 - 最近一次 Agent 响应或人工决策（如有）。
+- Harness 提供的待处理人工修订意见及对应目标版本；修订时必须逐项回应。
 - 当前动作的触发原因。
 
 不得无条件加载项目目录下所有历史版本、日志和测试证据。只读取当前动作所需的资料。

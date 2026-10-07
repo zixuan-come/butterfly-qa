@@ -58,32 +58,36 @@ class WorkflowRunTaskStore:
         return store.project_root(project_id) / "runs" / f"{run_id}.json"
 
     def save(self, task: WorkflowRunTask) -> WorkflowRunTask:
-        path = self._path(task.project_id, task.module_id, task.run_id)
-        ArtifactStore._write_json(path, task.model_dump(mode="json"))
+        with self._lock:
+            path = self._path(task.project_id, task.module_id, task.run_id)
+            ArtifactStore._write_json(path, task.model_dump(mode="json"))
         return task
 
     def load(self, project_id: str, run_id: str, module_id: str | None = None) -> WorkflowRunTask:
-        path = self._path(project_id, module_id, run_id)
-        if not path.is_file():
-            raise ArtifactStoreError(f"workflow run does not exist: {run_id}")
-        return WorkflowRunTask.model_validate(ArtifactStore._read_json(path))
+        # On Windows, an open polling reader can prevent atomic replacement.
+        with self._lock:
+            path = self._path(project_id, module_id, run_id)
+            if not path.is_file():
+                raise ArtifactStoreError(f"workflow run does not exist: {run_id}")
+            return WorkflowRunTask.model_validate(ArtifactStore._read_json(path))
 
     def latest(
         self,
         project_id: str,
         module_id: str | None = None,
     ) -> WorkflowRunTask | None:
-        store = ArtifactStore(self.projects_root, module_id=module_id)
-        runs_root = store.project_root(project_id) / "runs"
-        paths = list(runs_root.glob("run-*.json")) if runs_root.is_dir() else []
-        latest_task: WorkflowRunTask | None = None
-        for path in paths:
-            try:
-                task = WorkflowRunTask.model_validate(ArtifactStore._read_json(path))
-            except (ArtifactStoreError, ValueError):
-                continue
-            if latest_task is None or task.updated_at > latest_task.updated_at:
-                latest_task = task
+        with self._lock:
+            store = ArtifactStore(self.projects_root, module_id=module_id)
+            runs_root = store.project_root(project_id) / "runs"
+            paths = list(runs_root.glob("run-*.json")) if runs_root.is_dir() else []
+            latest_task: WorkflowRunTask | None = None
+            for path in paths:
+                try:
+                    task = WorkflowRunTask.model_validate(ArtifactStore._read_json(path))
+                except (ArtifactStoreError, ValueError):
+                    continue
+                if latest_task is None or task.updated_at > latest_task.updated_at:
+                    latest_task = task
         return latest_task
 
 

@@ -64,6 +64,10 @@ class WorkflowRun(BaseModel):
     current_requirement_input_id: str | None = None
     # The active review version whose risks were explicitly accepted by a human.
     accepted_requirement_review: ArtifactPointer | None = None
+    accepted_requirement_input_id: str | None = None
+    requirement_risk_acceptance_invalidated: bool = False
+    testcase_review_design: ArtifactPointer | None = None
+    revision_feedback: dict[str, str] = Field(default_factory=dict)
     active_artifacts: dict[str, ArtifactPointer] = Field(default_factory=dict)
     transition_history: list[WorkflowTransition] = Field(default_factory=list)
 

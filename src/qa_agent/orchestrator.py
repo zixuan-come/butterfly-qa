@@ -90,7 +90,22 @@ class WorkflowOrchestrator:
     def step(self, *, trigger: str = "main-flow-harness") -> OrchestrationResult:
         """Execute one main-flow decision and at most one specialist invocation."""
 
-        main_request = self._main_request()
+        try:
+            main_request = self._main_request()
+        except ValueError as exc:
+            now = datetime.now(timezone.utc)
+            return OrchestrationResult(
+                main_response=AgentResponse(
+                    request_id=f"main-{uuid4().hex}",
+                    role=AgentRole.MAIN_FLOW,
+                    status=AgentStatus.FAILED,
+                    error_type="workflow_context_error",
+                    error_message=str(exc),
+                    started_at=now,
+                    completed_at=now,
+                ),
+                error=f"workflow context rejected: {exc}",
+            )
         main_response = self.runner.run(main_request)
         if main_response.status is not AgentStatus.SUCCEEDED:
             return OrchestrationResult(
@@ -213,6 +228,16 @@ class WorkflowOrchestrator:
             for name, pointer in self.workflow.active_artifacts.items()
         ) or "无"
         routing_context = self._routing_context(refs)
+        agent_states = WorkflowStateMachine(self.workflow).available_states() - {
+            WorkflowState.COMPLETED,
+            WorkflowState.WAITING_MANUAL_EXECUTION,
+            WorkflowState.WAITING_REPORT_APPROVAL,
+        }
+        if self.workflow.current_state in {
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+            WorkflowState.WAITING_REPORT_APPROVAL,
+        }:
+            agent_states = frozenset()
         return AgentRequest(
             request_id=f"main-{uuid4().hex}",
             project_id=self.workflow.project_id,
@@ -220,11 +245,13 @@ class WorkflowOrchestrator:
             task_name=f"route:{self.workflow.current_state.value}",
             prompt=(
                 f"当前工作流状态为 {self.workflow.current_state.value}。\n"
-                f"允许的下一状态为：{', '.join(state.value for state in WorkflowStateMachine(self.workflow).available_states()) or '无'}。\n"
+                f"允许 Agent 建议的下一状态为：{', '.join(sorted(state.value for state in agent_states)) or '无，等待人工审批'}。\n"
+                f"人工介入前的阶段为：{self.workflow.manual_resume_state.value if self.workflow.manual_resume_state else '无'}。\n"
                 f"已导入的原始输入摘要：{input_summary}。\n"
                 f"当前活动结构化产物：{artifact_summary}。\n"
                 "以下是 Harness 已读取并校验过的路由摘要。你必须以该摘要为准，不要尝试通过文件系统重新读取产物，也不要因为无法访问工作区而猜测。\n"
                 f"路由摘要：\n{routing_context}\n"
+                f"人工修订意见：\n{self._feedback_context()}\n"
                 "如果当前状态是 requirement_analyzing，必须继续当前阶段的需求分析；"
                 "不得因为上一阶段评审报告仍有风险而重新退回需求评审。\n"
                 "你只负责路由，不得读取或评审原始需求内容。处理中状态缺少当前阶段产物时，"
@@ -405,8 +432,7 @@ class WorkflowOrchestrator:
         action: WorkflowAction,
     ) -> WorkflowAction:
         """Make the test owner, rather than the AI review, decide the quality gate."""
-        review = self.workflow.active_artifacts.get("testcase_review")
-        if review is None:
+        if not self._has_current_testcase_review():
             return action
         if self.workflow.current_state is WorkflowState.TESTCASE_REVIEWING:
             pass
@@ -432,10 +458,17 @@ class WorkflowOrchestrator:
         if not self._has_accepted_current_review_risk():
             return action
 
-        if self.workflow.current_state in {
-            WorkflowState.WAITING_PRODUCT_REVISION,
-            WorkflowState.MANUAL_INTERVENTION_REQUIRED,
-        }:
+        if (
+            self.workflow.current_state is WorkflowState.WAITING_PRODUCT_REVISION
+            or (
+                self.workflow.current_state is WorkflowState.MANUAL_INTERVENTION_REQUIRED
+                and self.workflow.manual_resume_state in {
+                    WorkflowState.REQUIREMENT_REVIEWING,
+                    WorkflowState.WAITING_PRODUCT_REVISION,
+                    WorkflowState.REQUIREMENT_ANALYZING,
+                }
+            )
+        ):
             return WorkflowAction(
                 action=WorkflowActionType.TRANSITION,
                 target_state=WorkflowState.REQUIREMENT_ANALYZING,
@@ -470,6 +503,21 @@ class WorkflowOrchestrator:
 
     def _has_accepted_current_review_risk(self) -> bool:
         """Return whether the active review was explicitly accepted by a human."""
+        if self.workflow.requirement_risk_acceptance_invalidated:
+            return False
+        current_id = (
+            self.workflow.current_requirement_input_id
+            or next((item.input_id for item in reversed(self.workflow.input_files)
+                     if item.category == "requirement"), None)
+        )
+        accepted_input = self.workflow.accepted_requirement_input_id
+        if accepted_input is not None and accepted_input != current_id:
+            return False
+        if accepted_input is None and sum(
+            item.category == "requirement" for item in self.workflow.input_files
+        ) > 1:
+            # Old approvals without a source-version binding cannot authorize revisions.
+            return False
         review = self.workflow.active_artifacts.get("requirement_review")
         if review is None:
             return False
@@ -496,9 +544,63 @@ class WorkflowOrchestrator:
             ):
                 return True
         return False
+
+    def _has_current_testcase_review(self) -> bool:
+        review = self.workflow.active_artifacts.get("testcase_review")
+        design = self.workflow.active_artifacts.get("test_design")
+        if review is None or design is None:
+            return False
+        if self.workflow.testcase_review_design is not None:
+            return self.workflow.testcase_review_design == design
+        if self.artifact_store is None:
+            return False
+        payload = self.artifact_store.load_artifact(
+            self.workflow.project_id, review.artifact_type,
+            review.artifact_id, review.version,
+        )
+        sources = payload.get("meta", {}).get("source_artifacts", [])
+        return (
+            f"{design.artifact_id}:v{design.version}" in sources
+            or (design.version == 1 and design.artifact_id in sources)
+        )
+
+    def _feedback_context(self, artifact_type: str | None = None) -> str:
+        feedback = []
+        for target_type, decision_id in self.workflow.revision_feedback.items():
+            if artifact_type is not None and target_type != artifact_type:
+                continue
+            if self.artifact_store is None:
+                raise OrchestrationError("artifact_store is required to load revision feedback")
+            decision = self.artifact_store.load_decision(self.workflow.project_id, decision_id)
+            feedback.append({
+                "approval_id": decision_id,
+                "target_artifact_type": target_type,
+                "target_artifact_id": decision["target_artifact_id"],
+                "target_artifact_version": decision["target_artifact_version"],
+                "decision": decision["decision"],
+                "comment": decision["comment"],
+            })
+        return json.dumps(feedback, ensure_ascii=False, indent=2) if feedback else "无"
+
     def _specialist_request(self, action: WorkflowAction) -> AgentRequest:
         refs = self._resolve_artifact_refs(action.input_artifact_refs)
         prompt = action.reason
+        if action.expected_output_type in self.workflow.revision_feedback:
+            prompt += "\n\n人工修订意见（必须逐项处理，无法处理的内容应说明原因）：\n"
+            prompt += self._feedback_context(action.expected_output_type)
+            previous = self.workflow.active_artifacts.get(action.expected_output_type)
+            if previous is not None and previous not in refs:
+                refs.append(previous)
+        if action.expected_output_type == "testcase_review":
+            design = self.workflow.active_artifacts.get("test_design")
+            if design is None:
+                raise OrchestrationError("test_design is required for testcase review")
+            if design not in refs:
+                refs.append(design)
+            prompt += (
+                "\n\nThe review meta.source_artifacts must include the exact active design "
+                f"version: {design.artifact_id}:v{design.version}."
+            )
         if action.skill_name == "requirement-analysis":
             review = self.workflow.active_artifacts.get("requirement_review")
             if review is None:
@@ -538,6 +640,31 @@ class WorkflowOrchestrator:
         )
 
     def _validate_action_target(self, action: WorkflowAction) -> None:
+        if action.target_state is not self.workflow.current_state and action.target_state in {
+            WorkflowState.COMPLETED,
+            WorkflowState.WAITING_MANUAL_EXECUTION,
+            WorkflowState.WAITING_REPORT_APPROVAL,
+        }:
+            raise OrchestrationError("this transition requires the dedicated approval or report service")
+        if self.workflow.current_state in {
+            WorkflowState.WAITING_TESTCASE_APPROVAL,
+            WorkflowState.WAITING_REPORT_APPROVAL,
+        } and (
+            action.action is WorkflowActionType.INVOKE_AGENT
+            or action.target_state not in {None, self.workflow.current_state}
+        ):
+            raise OrchestrationError("human approval is required before leaving this state")
+        if (
+            self.workflow.current_state is WorkflowState.WAITING_PRODUCT_REVISION
+            and action.target_state is WorkflowState.REQUIREMENT_ANALYZING
+            and not self._has_accepted_current_review_risk()
+        ):
+            raise OrchestrationError("human risk acceptance is required before requirement analysis")
+        if (
+            action.target_state is WorkflowState.WAITING_TESTCASE_APPROVAL
+            and not self._has_current_testcase_review()
+        ):
+            raise OrchestrationError("a review of the active test design is required")
         if action.action is WorkflowActionType.INVOKE_AGENT:
             expected_model = self._ARTIFACT_MODELS.get(action.expected_output_type or "")
             if expected_model is None:
@@ -631,7 +758,16 @@ class WorkflowOrchestrator:
                 self.workflow,
                 self.artifact_store,
             ).accept(artifact)
+            self.workflow.revision_feedback.pop(artifact_type, None)
+            self._save_workflow()
             return artifact, saved.json_path, saved.markdown_path, saved.transition
+        if artifact_type == "testcase_review":
+            design = self.workflow.active_artifacts.get("test_design")
+            if design is None or not (
+                f"{design.artifact_id}:v{design.version}" in artifact.meta.source_artifacts
+                or (design.version == 1 and design.artifact_id in artifact.meta.source_artifacts)
+            ):
+                raise OrchestrationError("testcase review must reference the active test design")
         artifact_path = self.artifact_store.save_artifact(artifact) if self.artifact_store else None
         markdown_path = None
         if artifact_type == "test_design" and self.artifact_store is not None:
@@ -647,6 +783,13 @@ class WorkflowOrchestrator:
             artifact_type=artifact.meta.artifact_type,
             version=artifact.meta.version,
         )
+        if artifact_type == "test_design":
+            self.workflow.testcase_review_design = None
+            for name in ("testcase_review", "test_execution", "test_report"):
+                self.workflow.active_artifacts.pop(name, None)
+        elif artifact_type == "testcase_review":
+            self.workflow.testcase_review_design = self.workflow.active_artifacts["test_design"]
+        self.workflow.revision_feedback.pop(artifact_type, None)
         self.workflow.active_artifacts[artifact_type] = pointer
         self.workflow.updated_at = datetime.now(timezone.utc)
         self._save_workflow()

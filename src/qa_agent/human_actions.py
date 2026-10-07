@@ -111,6 +111,21 @@ class HumanApprovalService:
                 artifact_type=approval.target_artifact_type,
                 version=approval.target_artifact_version,
             )
+            self.workflow.accepted_requirement_input_id = (
+                self.workflow.current_requirement_input_id
+                or next(
+                    (item.input_id for item in reversed(self.workflow.input_files)
+                     if item.category == "requirement"),
+                    None,
+                )
+            )
+            self.workflow.requirement_risk_acceptance_invalidated = False
+        if approval.decision is not ApprovalDecision.APPROVED:
+            self.workflow.revision_feedback[approval.target_artifact_type] = approval.meta.artifact_id
+            if approval.approval_type is ApprovalType.TESTCASE_APPROVAL:
+                self.workflow.testcase_review_design = None
+                for name in ("testcase_review", "test_execution", "test_report"):
+                    self.workflow.active_artifacts.pop(name, None)
         transition = WorkflowStateMachine(self.workflow).transition(
             target_state,
             triggered_by=approval.decided_by,

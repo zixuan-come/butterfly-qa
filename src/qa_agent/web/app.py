@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from ..agent_runner import AgentRunner
 from ..audit import AgentAuditStore, ResilientAgentRunner
@@ -549,25 +550,22 @@ def create_app(
         manager = _context_manager(request, project_id, module_id)
         _load_project(manager, project_id)
         temporary_path = await _receive_upload(request, file)
+        def persist_input():
+            with _project_lock(request, project_id, module_id):
+                _load_project(manager, project_id)
+                if category == InputCategory.REQUIREMENT:
+                    return manager.import_requirement_version(
+                        project_id, temporary_path,
+                        imported_by=imported_by, input_id=input_id,
+                        original_name=file.filename,
+                    )
+                return manager.import_input(
+                    project_id, temporary_path, category,
+                    imported_by=imported_by, input_id=input_id,
+                    original_name=file.filename,
+                ), True
         try:
-            if category == InputCategory.REQUIREMENT:
-                imported, changed = manager.import_requirement_version(
-                    project_id,
-                    temporary_path,
-                    imported_by=imported_by,
-                    input_id=input_id,
-                    original_name=file.filename,
-                )
-            else:
-                imported = manager.import_input(
-                    project_id,
-                    temporary_path,
-                    category,
-                    imported_by=imported_by,
-                    input_id=input_id,
-                    original_name=file.filename,
-                )
-                changed = True
+            imported, changed = await run_in_threadpool(persist_input)
         except ArtifactStoreError as exc:
             if "input_id already exists" in str(exc):
                 raise ApiError(

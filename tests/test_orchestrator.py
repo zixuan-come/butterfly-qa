@@ -97,6 +97,9 @@ def test_completed_testcase_review_recovers_manual_state_to_owner_approval(tmp_p
         artifact_type="testcase_review",
         version=1,
     )
+    design = ArtifactPointer(artifact_id="design-001", artifact_type="test_design", version=1)
+    workflow.active_artifacts["test_design"] = design
+    workflow.testcase_review_design = design
     original = WorkflowAction(
         action="manual_intervention",
         target_state=WorkflowState.MANUAL_INTERVENTION_REQUIRED,
@@ -512,6 +515,8 @@ def test_human_risk_acceptance_prevents_analysis_from_falling_back(tmp_path):
 def test_accepted_requirement_risk_recovers_from_blocked_states(tmp_path, state):
     workflow = make_workflow()
     workflow.current_state = state
+    if state is WorkflowState.MANUAL_INTERVENTION_REQUIRED:
+        workflow.manual_resume_state = WorkflowState.REQUIREMENT_ANALYZING
     review = ArtifactPointer(
         artifact_id="review-001",
         artifact_type="requirement_review",
